@@ -1,0 +1,4 @@
+numpy>=1.24
+sgp4>=2.23
+pyarrow>=14
+PyYAML>=6

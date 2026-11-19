@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.cache/
+.ipynb_checkpoints/
+.vscode/
+wandb/
+runs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+datasets/
+data/

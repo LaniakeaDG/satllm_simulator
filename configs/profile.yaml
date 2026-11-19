@@ -1,0 +1,24 @@
+# 固定入口：python -m offline.profile；相对路径以 satllm_simulator 为基准。
+# null 表示尚未确定，入口会拒绝执行，不会生成假结果或自动下载模型。
+models:
+  qwen25_7b: null
+  qwen25_14b: null
+  qwen25_32b: null
+
+# 输入数据待定。若选择沿用原脚本的随机张量单层微基准，显式改为
+# synthetic_hidden_states；该模式不读取文本、不执行 embedding 或整模型推理。
+input_mode: null
+prefill_total_tokens: null
+prefill_batch_size: 1
+prefill_chunk_sizes: [64, 128, 256, 512]
+decode_batch_sizes: [1, 32, 64, 128]
+# 每个 Decode step 的历史 KV 长度列表，需明确填写，例如 [指定长度, ...]。
+decode_cache_lengths: null
+
+device: cuda:0
+dtype: bfloat16
+warmup: 5
+repeats: 30
+seed: 0
+allow_busy_gpu: false
+output_dir: data/profiles
