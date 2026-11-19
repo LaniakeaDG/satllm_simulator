@@ -41,11 +41,12 @@ def read_model_config(model_dir):
         if not isinstance(value, (float, int)) or not 0 < value < float("inf"):
             raise ValueError(f"模型配置 {key} 必须为正有限数。")
     heads = config["num_attention_heads"]
-    head_dim = config.get("head_dim", config["hidden_size"] // heads)
+    default_head_dim = 128 if config["model_type"] == "qwen3" else config["hidden_size"] // heads
+    head_dim = config.get("head_dim", default_head_dim)
     if (type(head_dim) is not int or head_dim <= 0 or head_dim % 2
             or heads % config["num_key_value_heads"]):
         raise ValueError("head_dim 必须为正偶数，attention heads 必须整除 KV heads。")
-    if "head_dim" not in config and config["hidden_size"] % heads:
+    if config["model_type"] == "qwen2" and "head_dim" not in config and config["hidden_size"] % heads:
         raise ValueError("未提供 head_dim 时，hidden_size 必须能被 attention heads 整除。")
     config["head_dim"] = head_dim
     return config
@@ -146,9 +147,10 @@ class WeightStore:
             with safe_open(self.model_dir / "model.safetensors", framework="pt", device="cpu") as source:
                 self.weight_map = {name: "model.safetensors" for name in source.keys()}
         for shard in set(self.weight_map.values()):
-            path = (self.model_dir / shard).resolve()
-            if not path.is_relative_to(self.model_dir) or not path.is_file():
-                raise ValueError(f"权重分片不存在或位于模型目录之外：{shard}")
+            relative = Path(shard)
+            if relative.is_absolute() or ".." in relative.parts or not (self.model_dir / relative).is_file():
+                raise ValueError(f"权重分片不存在或名称越出模型目录：{shard}")
+            # 本地 Hugging Face snapshot 的合法分片可以链接到同一缓存的 blobs/。
 
     def read_tensor(self, name):
         from safetensors import safe_open
