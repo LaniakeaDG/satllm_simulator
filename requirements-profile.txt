@@ -1,5 +1,6 @@
-# 离线 GPU Profile 的独立依赖，不要求链路生成环境安装 PyTorch。
-# torch 需安装与本机驱动匹配的 CUDA 版本。
+# torch 需安装与本机驱动匹配的 CUDA 版本；复用 orbitserve 的已有 PyTorch。
 PyYAML>=6
 torch>=2.7,<3
+transformers==4.57.6
 safetensors>=0.4.3
+nvidia-ml-py>=12

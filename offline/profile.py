@@ -1,13 +1,10 @@
-"""逐层加载本地真实权重，测量 GPU 上 chunked Prefill 和单 token Decode。
-
-固定读取 configs/profile.yaml，不下载模型，不选择数据集。当前提供显式启用的
-synthetic_hidden_states 微基准输入；这不是整模型、文本数据集或端到端推理测量。
-"""
+"""ShareGPT 驱动的真实逐层 Profile：chunked Prefill 与 KV 持续增长的 Decode。"""
 
 import csv
 import json
 import os
 import platform
+import re
 import statistics
 import subprocess
 from datetime import datetime, timezone
@@ -16,7 +13,9 @@ from pathlib import Path
 import torch
 import yaml
 
-from .decoder import DecoderLayer, WeightStore, causal_mask, read_model_config
+from .decoder import DecoderLayer, RMSNorm, WeightStore, causal_mask, read_model_config
+from .power import PowerMeter
+from .workload import load_workload
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_FILE = PROJECT_ROOT / "configs/profile.yaml"
@@ -30,216 +29,296 @@ def project_path(value):
 def validate_settings(settings):
     if not isinstance(settings, dict):
         raise ValueError("Profile 配置必须为 YAML 映射。")
-    if settings.get("input_mode") != "synthetic_hidden_states":
-        raise ValueError("输入数据待定：请先明确输入方案；微基准可显式设置 input_mode: synthetic_hidden_states。")
-    if settings.get("dtype") not in DTYPES:
-        raise ValueError(f"dtype 必须为 {list(DTYPES)} 中的一项。")
-    for key, minimum in (("prefill_total_tokens", 1), ("prefill_batch_size", 1),
-                         ("warmup", 0), ("repeats", 1), ("seed", 0)):
-        if type(settings.get(key)) is not int or settings[key] < minimum:
-            raise ValueError(f"{key} 必须显式设置为不小于 {minimum} 的整数。")
-    for key, minimum in (("prefill_chunk_sizes", 1), ("decode_batch_sizes", 1),
-                         ("decode_cache_lengths", 0)):
+    for key in ("sample_requests", "max_input_tokens", "decode_steps", "decode_prefill_chunk_size", "repeats"):
+        if type(settings.get(key)) is not int or settings[key] < 1:
+            raise ValueError(f"{key} 必须为正整数。")
+    if type(settings.get("warmup")) is not int or settings["warmup"] < 0:
+        raise ValueError("warmup 必须为非负整数。")
+    for key in ("prefill_chunk_sizes", "decode_batch_sizes", "decode_context_lengths"):
         values = settings.get(key)
-        if (not isinstance(values, list) or not values
-                or any(type(value) is not int or value < minimum for value in values)
-                or len(set(values)) != len(values)):
-            raise ValueError(f"{key} 必须是非空、无重复、不小于 {minimum} 的整数列表。")
-    if type(settings.get("allow_busy_gpu")) is not bool:
-        raise ValueError("allow_busy_gpu 必须为布尔值。")
-    if not isinstance(settings.get("output_dir"), str) or not settings["output_dir"]:
-        raise ValueError("output_dir 必须是非空路径。")
-    device = torch.device(settings.get("device", "cuda:0"))
-    if device.type != "cuda":
-        raise ValueError("性能 Profile 仅支持 CUDA GPU，不以 CPU 时间代替 GPU 结果。")
+        if (not isinstance(values, list) or not values or len(set(values)) != len(values)
+                or any(type(value) is not int or value < 1 for value in values)):
+            raise ValueError(f"{key} 必须为非空、无重复的正整数列表。")
+    if max(settings["decode_batch_sizes"]) > settings["sample_requests"]:
+        raise ValueError("Decode batch size 不能超过每种上下文长度的请求池大小。")
+    if max(settings["decode_context_lengths"]) > settings["max_input_tokens"]:
+        raise ValueError("Decode 初始上下文长度不能超过 max_input_tokens。")
+    for key in ("power_settle_s", "power_measure_s", "power_sample_interval_s"):
+        value = settings.get(key)
+        if not isinstance(value, (int, float)) or not 0 < value < float("inf"):
+            raise ValueError(f"{key} 必须为正有限数。")
+    if settings["power_measure_s"] < 1 or settings["power_settle_s"] < 1:
+        raise ValueError("NVML 功率采样和稳态准备窗口均至少为 1 秒。")
+    if settings.get("dtype") not in DTYPES or torch.device(settings["device"]).type != "cuda":
+        raise ValueError("需要浮点 dtype 和 CUDA device。")
+    dataset = project_path(settings["dataset"])
+    if not dataset.is_file():
+        raise FileNotFoundError(dataset)
     models = settings.get("models")
-    if not isinstance(models, dict):
-        raise ValueError("models 必须是模型名称到本地目录的映射，null 表示尚未配置。")
+    if not isinstance(models, dict) or not models:
+        raise ValueError("models 必须为模型名到本地目录的非空映射。")
     selected = {}
     for name, directory in models.items():
         if directory is None:
             continue
-        if (not isinstance(name, str) or not name or name in (".", "..")
-                or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in name)):
-            raise ValueError("模型名称只能包含英文字母、数字、下划线和连字符。")
-        if not isinstance(directory, str) or not directory:
-            raise ValueError(f"{name} 的模型目录必须为非空路径或 null。")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in (".", ".."):
+            raise ValueError("模型名称只能包含英文字母、数字、点、下划线和连字符。")
         model_dir = project_path(directory)
         config = read_model_config(model_dir)
-        required = max(settings["prefill_total_tokens"], max(settings["decode_cache_lengths"]) + 1)
-        if required > config["max_position_embeddings"]:
-            raise ValueError(f"{name} 的输入长度超过模型 max_position_embeddings。")
-        output = project_path(settings["output_dir"]) / name
-        if output.exists():
-            raise FileExistsError(f"已有结果不覆盖：{output}")
+        if max(settings["max_input_tokens"], max(settings["decode_context_lengths"]) + settings["decode_steps"]) > config["max_position_embeddings"]:
+            raise ValueError(f"{name} 的输入与生成长度超过模型位置编码上限。")
         selected[name] = (model_dir, config)
     if not selected:
-        raise ValueError("尚未配置本地模型目录；请填写 models 中至少一个模型的路径。")
+        raise ValueError("没有配置本地模型。")
     return selected
 
 
-def gpu_environment(device, allow_busy):
+def gpu_environment(device):
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA 不可用，请安装匹配驱动的 CUDA 版 PyTorch。")
+        raise RuntimeError("CUDA 不可用。")
     torch.cuda.set_device(device)
     properties = torch.cuda.get_device_properties(device)
-    if not getattr(properties, "uuid", None):
-        raise RuntimeError("无法确定当前 CUDA 设备的 UUID，不能可靠检查 GPU 占用。")
-    command = ["nvidia-smi", f"--id={properties.uuid}",
-               "--query-compute-apps=pid,process_name,used_gpu_memory", "--format=csv,noheader,nounits"]
+    uuid = getattr(properties, "uuid", None)
+    if not uuid:
+        raise RuntimeError("无法确定目标 GPU UUID，停止测量。")
     try:
+        command = ["nvidia-smi", f"--id={uuid}", "--query-compute-apps=pid,process_name,used_gpu_memory",
+                   "--format=csv,noheader,nounits"]
         result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as error:
-        raise RuntimeError("无法通过 nvidia-smi 检查目标 GPU 占用，停止测量。") from error
-    processes = list(csv.reader(result.stdout.splitlines(), skipinitialspace=True))
-    others = [row for row in processes if row and row[0].strip() != str(os.getpid())]
-    if others and not allow_busy:
-        raise RuntimeError(f"目标 GPU 存在其他计算进程，不运行 Profile：{others}")
+        raise RuntimeError("无法检查目标 GPU 占用，停止测量。") from error
+    others = [row for row in csv.reader(result.stdout.splitlines(), skipinitialspace=True)
+              if row and row[0].strip() != str(os.getpid())]
+    if others:
+        raise RuntimeError(f"目标 GPU 存在其他计算进程，不运行时延/功率测量：{others}")
     return {
         "python": platform.python_version(), "torch": torch.__version__, "cuda": torch.version.cuda,
-        "device": str(device), "gpu": properties.name, "uuid": str(properties.uuid),
+        "device": str(device), "device_type": properties.name, "uuid": str(uuid),
         "total_memory_bytes": properties.total_memory,
         "compute_capability": [properties.major, properties.minor], "other_compute_processes": others,
-        "float32_matmul_precision": torch.get_float32_matmul_precision(),
     }
 
 
-def allocate_cache(config, batch, capacity, device, dtype, prefix_length=0):
-    shape = (batch, config["num_key_value_heads"], capacity, config["head_dim"])
-    cache = (torch.empty(shape, device=device, dtype=dtype), torch.empty(shape, device=device, dtype=dtype))
-    for tensor in cache:
-        if prefix_length:
-            tensor[:, :, :prefix_length].normal_()
-    return cache
+class StreamingModel:
+    """真实层间传递，CPU 保存权重，GPU 仅驻留当前层；所有层 KV 保留在 GPU。"""
+
+    def __init__(self, model_dir, config, device, dtype):
+        self.config, self.device, self.dtype = config, device, dtype
+        store = WeightStore(model_dir)
+        with torch.device("meta"):
+            self.layer = DecoderLayer(config, dtype)
+        self.layer.to_empty(device=device).eval().requires_grad_(False)
+        self.weights = []
+        for index in range(config["num_hidden_layers"]):
+            tensors = {}
+            for name, parameter in self.layer.named_parameters():
+                module = name.split(".")[0]
+                prefix = "self_attn." if module in ("q_proj", "k_proj", "v_proj", "o_proj", "q_norm", "k_norm") else (
+                    "mlp." if module in ("gate_proj", "up_proj", "down_proj") else "")
+                tensor = store.read_tensor(f"model.layers.{index}.{prefix}{name}")
+                if tensor.shape != parameter.shape:
+                    raise ValueError(f"第 {index} 层权重形状不匹配：{name}")
+                tensors[name] = tensor.to(dtype=dtype)
+            self.weights.append(tensors)
+        self.embedding = store.read_tensor("model.embed_tokens.weight").to(dtype=dtype)
+        self.head = self.embedding if config.get("tie_word_embeddings") else store.read_tensor("lm_head.weight").to(dtype=dtype)
+        self.norm = RMSNorm(config["hidden_size"], config.get("rms_norm_eps", 1e-6), dtype).to(device)
+        self.norm.requires_grad_(False)
+        with torch.inference_mode():
+            self.norm.weight.copy_(store.read_tensor("model.norm.weight"))
+        self.loaded_layer = None
+
+    def activate(self, index):
+        if self.loaded_layer == index:
+            return
+        with torch.inference_mode():
+            for name, parameter in self.layer.named_parameters():
+                parameter.copy_(self.weights[index][name])
+        self.loaded_layer = index
+
+    def new_cache(self, batch, capacity):
+        shape = (batch, self.config["num_key_value_heads"], capacity, self.config["head_dim"])
+        return [(torch.empty(shape, device=self.device, dtype=self.dtype),
+                 torch.empty(shape, device=self.device, dtype=self.dtype))
+                for _ in range(self.config["num_hidden_layers"])]
+
+    def forward(self, input_ids, caches, offset, measure=None):
+        hidden = torch.nn.functional.embedding(input_ids.cpu(), self.embedding).to(self.device)
+        mask = causal_mask(offset, input_ids.shape[1], self.device)
+        for index, cache in enumerate(caches):
+            self.activate(index)
+            operation = lambda: self.layer(hidden, cache, offset, mask)
+            if measure is not None:
+                measure(index, operation)
+            hidden = operation()
+        return hidden
+
+    def next_token(self, hidden):
+        # Embedding、最终 norm、LM head 与 greedy argmax 用于真实生成，但不计入层 Profile。
+        head = self.head.to(self.device)
+        logits = torch.nn.functional.linear(self.norm(hidden[:, -1:]), head)
+        return logits[:, -1].argmax(-1, keepdim=True).cpu()
 
 
-def benchmark_forward(layer, hidden, cache, offset, mask, settings, device):
-    """重复覆盖当前 chunk/单 token 的 KV 槽，不改变历史前缀与有效上下文长度。"""
-    with torch.inference_mode():
-        for _ in range(settings["warmup"]):
-            layer(hidden, cache, offset, mask)
-        torch.cuda.synchronize(device)
-        baseline = torch.cuda.memory_allocated(device)
-        torch.cuda.reset_peak_memory_stats(device)
-        starts = [torch.cuda.Event(enable_timing=True) for _ in range(settings["repeats"])]
-        ends = [torch.cuda.Event(enable_timing=True) for _ in starts]
-        for start, end in zip(starts, ends):
-            start.record()
-            layer(hidden, cache, offset, mask)
-            end.record()
-        torch.cuda.synchronize(device)
+def benchmark_forward(forward, meter, device, settings):
+    for _ in range(settings["warmup"]):
+        forward()
+    torch.cuda.synchronize(device)
+    baseline = torch.cuda.memory_allocated(device)
+    torch.cuda.reset_peak_memory_stats(device)
+    starts = [torch.cuda.Event(enable_timing=True) for _ in range(settings["repeats"])]
+    ends = [torch.cuda.Event(enable_timing=True) for _ in starts]
+    for start, end in zip(starts, ends):
+        start.record()
+        forward()
+        end.record()
+    torch.cuda.synchronize(device)
     samples = [start.elapsed_time(end) for start, end in zip(starts, ends)]
-    return samples, baseline, torch.cuda.max_memory_allocated(device)
+    peak = torch.cuda.max_memory_allocated(device)
+    latency = statistics.fmean(samples)
+    power = meter.measure(forward, device, latency, settings)
+    return {"latency_ms": latency, **power, "peak_memory_bytes": peak,
+            "baseline_memory_bytes": baseline, "latency_samples_ms": samples}
 
 
-def profile_cases(layer, config, settings, device, dtype):
-    """Prefill 沿整段输入逐块推进；Decode 独立扫描指定 batch 和历史长度。"""
-    total = settings["prefill_total_tokens"]
-    batch = settings["prefill_batch_size"]
-    # 同一层的四种 chunk size 使用相同输入，各自从空 KV 开始。
-    hidden = torch.randn(batch, total, config["hidden_size"], device=device, dtype=dtype)
+def append_record(destination, record, first):
+    if not first:
+        destination.write(",\n")
+    json.dump(record, destination, ensure_ascii=False, allow_nan=False)
+    destination.flush()
+
+
+def run_prefill(model, requests, settings, record):
     for chunk_size in settings["prefill_chunk_sizes"]:
-        cache = allocate_cache(config, batch, total, device, dtype)
-        for chunk_index, offset in enumerate(range(0, total, chunk_size)):
-            length = min(chunk_size, total - offset)
-            mask = causal_mask(offset, length, device)
-            values = benchmark_forward(layer, hidden[:, offset:offset + length], cache, offset,
-                                       mask, settings, device)
-            yield {
-                "phase": "prefill", "batch_size": batch, "prefill_total_tokens": total,
-                "chunk_size": chunk_size, "chunk_index": chunk_index,
-                "query_tokens": length, "cache_length": offset, "cache_capacity": total,
-            }, values
-            del mask
-        del cache
-    del hidden
-    for cache_length in settings["decode_cache_lengths"]:
+        for request in requests:
+            tokens = request["input_ids"]
+            caches = model.new_cache(1, len(tokens))
+            for chunk_index, offset in enumerate(range(0, len(tokens), chunk_size)):
+                ids = torch.tensor([tokens[offset:offset + chunk_size]], dtype=torch.long)
+                case = {"request_id": request["request_id"], "dataset_index": request["dataset_index"],
+                        "chunk_size": chunk_size, "chunk_index": chunk_index, "batch_size": 1,
+                        "input_length": len(tokens), "context_length": offset, "query_tokens": ids.shape[1]}
+                model.forward(ids, caches, offset, lambda index, operation: record(index, case, operation))
+            del caches
+            print(f"Prefill chunk={chunk_size}, request={request['dataset_index']} 完成", flush=True)
+
+
+def run_decode(model, pools, settings, record):
+    for context, requests in pools.items():
         for batch in settings["decode_batch_sizes"]:
-            hidden = torch.randn(batch, 1, config["hidden_size"], device=device, dtype=dtype)
-            cache = allocate_cache(config, batch, cache_length + 1, device, dtype, cache_length)
-            values = benchmark_forward(layer, hidden, cache, cache_length, None, settings, device)
-            yield {
-                "phase": "decode", "batch_size": batch, "prefill_total_tokens": None,
-                "chunk_size": None, "chunk_index": None, "query_tokens": 1,
-                "cache_length": cache_length, "cache_capacity": cache_length + 1,
-            }, values
-            del hidden, cache
+            chosen = requests[:batch]
+            ids = torch.tensor([request["input_ids"] for request in chosen], dtype=torch.long)
+            caches = model.new_cache(batch, context + settings["decode_steps"])
+            # 用真实请求、真实层间激活填满所有层的历史 KV，不将准备阶段计入 Decode。
+            for offset in range(0, context, settings["decode_prefill_chunk_size"]):
+                hidden = model.forward(ids[:, offset:offset + settings["decode_prefill_chunk_size"]], caches, offset)
+            token = model.next_token(hidden)
+            del hidden
+            for step in range(settings["decode_steps"]):
+                case = {"batch_size": batch, "initial_context_length": context,
+                        "context_length": context + step, "step": step, "query_tokens": 1,
+                        "request_ids": [request["request_id"] for request in chosen],
+                        "dataset_indices": [request["dataset_index"] for request in chosen]}
+                hidden = model.forward(token, caches, context + step,
+                                       lambda index, operation: record(index, case, operation))
+                token = model.next_token(hidden)
+                del hidden
+                print(f"Decode batch={batch}, context={context + step}, step={step + 1}/{settings['decode_steps']} 完成", flush=True)
+            del caches
 
 
-def statistics_row(name, layer_index, case, values, dtype):
-    samples, baseline, peak = values
-    return {
-        "model": name, "layer_index": layer_index, "dtype": dtype, **case,
-        "samples": len(samples), "mean_ms": statistics.fmean(samples),
-        "median_ms": statistics.median(samples), "stddev_ms": statistics.pstdev(samples),
-        "min_ms": min(samples), "max_ms": max(samples),
-        "baseline_allocated_mib": baseline / 1024**2, "peak_allocated_mib": peak / 1024**2,
-        "peak_increment_mib": (peak - baseline) / 1024**2,
-    }
+def output_paths(name, device_type, settings):
+    device_name = re.sub(r"[^A-Za-z0-9.-]+", "_", device_type).strip("_")
+    base = project_path(settings["output_dir"]) / f"{name}_{device_name}"
+    return {phase: base.with_name(base.name + f"_{phase}.json") for phase in ("prefill", "decode")}
 
 
 def profile_model(name, model_dir, config, settings, device, environment):
-    store = WeightStore(model_dir)
-    output = project_path(settings["output_dir"]) / name
-    output.mkdir(parents=True, exist_ok=False)
-    metadata = {
-        "status": "running", "started_at_utc": datetime.now(timezone.utc).isoformat(),
-        "benchmark_kind": "real_weight_single_decoder_layer_synthetic_hidden_states",
-        "model": name, "model_dir": str(model_dir), "model_config": config,
-        "settings": settings, "environment": environment, "completed_cases": 0,
-        "timing": "CUDA events; PyTorch SDPA auto backend; eager execution; no torch.compile",
-        "included": ["RMSNorm", "QKV projections", "RoPE", "static KV writes", "attention", "MLP", "residuals"],
-        "excluded": ["weight loading", "input/cache allocation and initialization", "mask creation",
-                     "embeddings", "final norm", "LM head", "sampling", "cross-layer execution"],
-        "input_scope": "Random layer inputs; Prefill KV computed from preceding chunks of the same input; Decode historical KV is synthetic.",
-        "cache_policy": "Preallocated per case, in-place append; warmup and repeats overwrite only current slots, preserving the same prefix.",
-        "memory_scope": "PyTorch allocated bytes for one resident layer, full input, reserved-capacity KV tensors, mask and temporaries; not full-model or nvidia-smi memory.",
-        "power_measured": False,
-    }
+    paths = output_paths(name, environment["device_type"], settings)
+    # 同目录的每阶段锁文件也用于标记硬中断后的不完整运行；不自动覆盖或删除。
+    locks = {phase: path.with_suffix(".json.lock") for phase, path in paths.items()}
+    for path in [*paths.values(), *locks.values()]:
+        if path.exists():
+            raise FileExistsError(f"已有结果或未完成运行不覆盖：{path}")
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    acquired = []
     try:
-        dtype = DTYPES[settings["dtype"]]
-        if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
-            raise RuntimeError("目标 GPU 不支持 BF16，请显式调整 dtype。")
-        torch.manual_seed(settings["seed"])
-        layer = DecoderLayer(config, dtype).to(device).eval().requires_grad_(False)
-        with (output / "layers.csv").open("x", encoding="utf-8", newline="") as table, \
-                (output / "samples.jsonl").open("x", encoding="utf-8") as raw:
-            writer = None
-            for layer_index in range(config["num_hidden_layers"]):
-                store.load_layer(layer, layer_index)
-                torch.cuda.synchronize(device)
-                for case, values in profile_cases(layer, config, settings, device, dtype):
-                    row = statistics_row(name, layer_index, case, values, settings["dtype"])
-                    if writer is None:
-                        writer = csv.DictWriter(table, fieldnames=list(row))
-                        writer.writeheader()
-                    writer.writerow(row)
-                    raw.write(json.dumps({"model": name, "layer_index": layer_index, **case,
-                                          "elapsed_ms": values[0]}, ensure_ascii=False) + "\n")
-                    table.flush()
-                    raw.flush()
-                    metadata["completed_cases"] += 1
-                print(f"{name}: layer {layer_index + 1}/{config['num_hidden_layers']} 完成", flush=True)
-        metadata["status"] = "complete"
+        for path in locks.values():
+            with path.open("x") as destination:
+                destination.write(str(os.getpid()))
+            acquired.append(path)
+    except BaseException:
+        for path in acquired:
+            path.unlink()
+        raise
+    metadata = {
+        "model_id": {"name": name, "structure": config}, "device_type": environment["device_type"],
+        "environment": environment, "settings": settings, "model_dir": str(model_dir),
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "timing_scope": "single decoder layer eager SDPA; includes norms, RoPE, KV write, attention, MLP; excludes CPU weight copy, embedding, final norm/head/argmax, mask construction",
+        "power_scope": "NVML total GPU board watts, no idle subtraction; separate steady replay of the same layer/case, not instantaneous per-token energy or full-model power",
+        "memory_scope": "PyTorch process peak allocated GPU bytes during latency samples; all-layer preallocated KV + one resident decoder layer + live inputs/temporary tensors; excludes CPU weight storage; not per-layer-exclusive memory",
+        "cache_policy": "all layers retain real KV; fixed-position replay overwrites current slots only; actual Decode advances one position after all layers; no EOS removal",
+        "decode_semantics": "Prefill prepares the first generated token; each profiled step consumes the preceding generated token, appends KV and greedily generates the next token; context_length is before that append",
+    }
+    temporary = {phase: path.with_suffix(".json.partial") for phase, path in paths.items()}
+    meter = None
+    files = {}
+    counts = {phase: 0 for phase in paths}
+    status, failure = "failed", None
+    try:
+        prefill, decode, dataset = load_workload(project_path(settings["dataset"]), model_dir, settings)
+        metadata["dataset"] = dataset
+        if settings["dtype"] == "bfloat16" and not torch.cuda.is_bf16_supported():
+            raise RuntimeError("目标 GPU 不支持 BF16。")
+        meter = PowerMeter(environment["uuid"])
+        model = StreamingModel(model_dir, config, device, DTYPES[settings["dtype"]])
+        for phase, path in temporary.items():
+            files[phase] = path.open("x", encoding="utf-8")
+            files[phase].write('{"records":[\n')
+        def record(phase, index, case, operation):
+            values = benchmark_forward(operation, meter, device, settings)
+            row = {"model_id": name, "device_type": environment["device_type"],
+                   "model_layers": [index], **case, **values}
+            append_record(files[phase], row, counts[phase] == 0)
+            counts[phase] += 1
+        with torch.inference_mode():
+            run_prefill(model, prefill, settings, lambda *args: record("prefill", *args))
+            run_decode(model, decode, settings, lambda *args: record("decode", *args))
+        status = "complete"
     except BaseException as error:
-        metadata["status"] = "failed"
-        metadata["error"] = f"{type(error).__name__}: {error}"
+        failure = f"{type(error).__name__}: {error}"
         raise
     finally:
-        metadata["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
-        with (output / "metadata.json").open("x", encoding="utf-8") as destination:
-            json.dump(metadata, destination, ensure_ascii=False, indent=2)
-    return output
+        metadata.update(status=status, error=failure, completed_records=counts,
+                        finished_at_utc=datetime.now(timezone.utc).isoformat())
+        for phase, destination in files.items():
+            destination.write('],"metadata":')
+            json.dump(metadata | {"phase": phase}, destination, ensure_ascii=False, allow_nan=False)
+            destination.write("}\n")
+            destination.close()
+            # 硬链接发布不覆盖，即使其他进程在检查后创建了目标文件也会失败。
+            os.link(temporary[phase], paths[phase])
+            temporary[phase].unlink()
+        if meter is not None:
+            meter.close()
+        for path in acquired:
+            path.unlink()
+    return paths
 
 
 def main():
     settings = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
     selected = validate_settings(settings)
     device = torch.device(settings["device"])
-    environment = gpu_environment(device, settings["allow_busy_gpu"])
+    environment = gpu_environment(device)  # 忙 GPU 必须在分词、模型加载和输出创建之前拒绝。
     for name, (model_dir, config) in selected.items():
-        output = profile_model(name, model_dir, config, settings, device, environment)
-        print(f"已保存：{output}", flush=True)
+        for path in output_paths(name, environment["device_type"], settings).values():
+            if path.exists():
+                raise FileExistsError(f"已有结果不覆盖：{path}")
+        paths = profile_model(name, model_dir, config, settings, device, environment)
+        print(f"已保存：{paths}", flush=True)
 
 
 if __name__ == "__main__":

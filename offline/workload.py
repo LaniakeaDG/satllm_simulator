@@ -26,7 +26,7 @@ def select_requests(records, tokenizer, count, max_tokens, context_lengths):
         if message is None:
             continue
         tokens = tokenizer.apply_chat_template(
-            [{"role": "user", "content": message}], tokenize=True, add_generation_prompt=True,
+            [{"role": "user", "content": message}], tokenize=True, add_generation_prompt=True, tokenizer_kwargs={"verbose": False},
         )
         if not tokens:
             continue

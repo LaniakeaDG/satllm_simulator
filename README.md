@@ -2,21 +2,6 @@
 
 总体规划与完整代码框架见 [DESIGN.md](DESIGN.md)，项目范围和实现原则见 [CLAUDE.md](CLAUDE.md)。
 
-当前具备业务实现的是离线卫星轨道与链路事件生成，以及真实权重逐层 GPU Profile。Profile 输入与模型路径仍待配置，尚未生成正式 GPU 测量结果。策略、在线传输、节点计算、统一仿真调度和指标统计仅保留职责骨架，不提供模拟结果。在线入口在接口与模型明确前会显式报未实现错误。
-
-## 运行
-
-需要 Python 3.10 或更新版本。在项目目录下运行：
-
-```bash
-cd /home/zdg/OrbitServe/satllm_simulator
-python -m pip install -r requirements.txt
-python -m offline.generate_links
-```
-
-当前机器可使用 `/home/zdg/.conda/envs/orbitserve/bin/python`。
-
-入口固定读取 [configs/orbit.yaml](configs/orbit.yaml)，无需命令行参数。配置中的相对路径均相对于项目目录。
 
 ## 时间设置
 
@@ -178,7 +163,7 @@ Prefill 四种 chunk size 使用同一层的相同随机输入。层内使用真
 | [offline/generate_links.py](offline/generate_links.py) | 配置、采样、事件差分与持久化。 |
 | [offline/decoder.py](offline/decoder.py) | Qwen2 / Qwen2.5 / Qwen3 dense 单层算子、因果 mask 与真实权重加载。 |
 | [offline/profile.py](offline/profile.py) | 多模型逐层 Chunked Prefill / Decode GPU 测量；输入与本地模型路径待配置。 |
-| [strategy.py](strategy.py) | 骨架：等待任务字段及策略规则。 |
+| [strategy]| 骨架：等待任务字段及策略规则。 |
 | [execution/simulator.py](execution/simulator.py) | 骨架：等待统一事件与状态接口。 |
 | [execution/transmission.py](execution/transmission.py) | 骨架：等待路由、共享带宽及能耗规则。 |
 | [execution/computation.py](execution/computation.py) | 骨架：等待队列、Batch、KV Cache 及能耗规则。 |
