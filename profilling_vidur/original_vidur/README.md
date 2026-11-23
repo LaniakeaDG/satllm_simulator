@@ -2,7 +2,7 @@
 
 ## 1. A100 / Llama-2-7B 原数据实际测量了什么
 
-来源为 `data/profiling/compute/a100/meta-llama/Llama-2-7b-hf/{mlp,attention}.csv`，不是本机新 profiling。`a100` 是原目录标记；CSV 未记录显存容量、GPU 具体型号/时钟、驱动等，不能据此认定为 A100 80GB。
+来源为 `data/profiling/compute/a100/meta-llama/Llama-2-7b-hf/{mlp,attention}.csv`
 
 ### 固定参数与精度
 
@@ -85,3 +85,95 @@ MLP 总计1044原行、1044全行去重记录、1036个TP内唯一形状，Atten
 ```
 
 只加载可信本地joblib，使用manifest记录的依赖版本。组件耗时不能直接无条件相加为全模型端到端时延；层数、TP collective、流水线、调度及CPU开销等仍需另行建模，本目录不提供在线仿真接口。
+
+## 3. 模型调用方法
+
+预测只需 CPU，不需要 GPU、模型权重或启动 Vidur 仿真器。使用上述 Python 环境和已有 `dependencies/`；以下代码可在 Python 脚本或交互环境中直接运行。模型文件名带哈希，**通过 manifest 选择，不要硬编码文件名**。
+
+### 加载指定 TP 的组件并预测
+
+```python
+import json
+import sys
+from functools import lru_cache
+from pathlib import Path
+
+ROOT = Path('/home/zdg/OrbitServe/satllm_simulator/profilling_vidur/original_vidur')
+sys.path.insert(0, str(ROOT.parent / 'dependencies'))
+
+import joblib
+import pandas as pd
+
+manifest = json.loads((ROOT / 'manifest.json').read_text(encoding='utf-8'))
+
+@lru_cache(maxsize=None)
+def load_component(tp, component):
+    if tp not in (1, 2, 4, 8):
+        raise ValueError('TP 只能为 1、2、4、8')
+    entries = [
+        e for e in manifest['models']
+        if e['component'] == component
+        and e['filters']['num_tensor_parallel_workers'] == tp
+    ]
+    if len(entries) != 1:
+        raise ValueError(f'模型不存在或不唯一: TP={tp}, {component}')
+    entry = entries[0]
+    return joblib.load(ROOT / entry['model_path']), entry
+
+def predict_ms(tp, component, **features):
+    model, entry = load_component(tp, component)
+    if set(features) != set(entry['features']):
+        raise ValueError(f"需要输入特征: {entry['features']}")
+    # 用列名保证特征顺序与训练时一致；每行是一组输入。
+    inputs = pd.DataFrame([features], columns=entry['features'])
+    return float(model.predict(inputs)[0])
+
+# A100 / Llama-2-7B / TP=1，输出单位均为 ms。
+print('QKV projection:', predict_ms(1, 'attn_pre_proj', num_tokens=128))
+print('Prefill attention:', predict_ms(
+    1, 'attn_prefill', kv_cache_size=512, prefill_chunk_size_squared=128 ** 2,
+))
+print('Decode attention:', predict_ms(
+    1, 'attn_decode', batch_size=32, kv_cache_size=1024,
+))
+```
+
+`predict_ms` 的第一个参数选择 TP；第二个参数必须为第2节的组件名。返回值是该组件的预测时延中位数（ms）。Prefill 的 chunk 必须先平方；Decode 的 context 是**每条序列**的历史长度，而不是 batch 内长度之和。函数只校验特征名，不自动检查组合是否在测量集合内；调用前应对照第1节或组合CSV。
+
+如需一次预测多组输入，取得 `model, entry = load_component(...)` 后，构造多行 `pd.DataFrame(..., columns=entry['features'])` 并调用 `model.predict(inputs)`，返回逐行的 ms 数组。
+
+### 估计单层计算时延
+
+下面继续使用上面的函数，将九个通用计算组件与对应阶段的 Attention 预测相加。Prefill 示例限定为 **batch=1**；Decode 示例限定为**所有序列具有相同历史长度**。这是文档中的组件求和示例，不是已验证精度的统一仿真接口。
+
+```python
+COMPUTE_COMPONENTS = (
+    'attn_pre_proj', 'attn_post_proj', 'mlp_up_proj', 'mlp_down_proj',
+    'mlp_act', 'input_layernorm', 'post_attention_layernorm', 'attn_rope', 'add',
+)
+
+# TP=1，单请求 Prefill：本轮128 tokens，历史上下文512 tokens。
+tp, chunk, context = 1, 128, 512
+prefill_parts = {
+    name: predict_ms(tp, name, num_tokens=chunk)
+    for name in COMPUTE_COMPONENTS
+}
+prefill_parts['attn_prefill'] = predict_ms(
+    tp, 'attn_prefill', kv_cache_size=context,
+    prefill_chunk_size_squared=chunk ** 2,
+)
+print('Prefill components (ms):', prefill_parts)
+print('Prefill single-layer compute estimate (ms):', sum(prefill_parts.values()))
+
+# TP=1，Decode：32条等长序列，各有1024 tokens历史，每条新增1 token。
+batch, context = 32, 1024
+decode_parts = {
+    name: predict_ms(tp, name, num_tokens=batch)
+    for name in COMPUTE_COMPONENTS
+}
+decode_parts['attn_decode'] = predict_ms(
+    tp, 'attn_decode', batch_size=batch, kv_cache_size=context,
+)
+print('Decode components (ms):', decode_parts)
+print('Decode single-layer compute estimate (ms):', sum(decode_parts.values()))
+```
