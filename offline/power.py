@@ -1,5 +1,6 @@
 """NVML 板卡功率：对固定层输入稳态重复执行，时间加权采样，不推测缺失数据。"""
 
+import os
 import time
 
 import pynvml
@@ -22,7 +23,15 @@ class PowerMeter:
     def close(self):
         pynvml.nvmlShutdown()
 
+    def assert_idle(self):
+        processes = (pynvml.nvmlDeviceGetComputeRunningProcesses(self.handle)
+                     + pynvml.nvmlDeviceGetGraphicsRunningProcesses(self.handle))
+        others = sorted({process.pid for process in processes if process.pid != os.getpid()})
+        if others:
+            raise RuntimeError(f"测量期间发现其他 GPU 进程：{others}")
+
     def measure(self, forward, device, latency_ms, settings):
+        self.assert_idle()
         # 每个提交批次约 20ms，避免无限排队；同步之后读取板卡遥测。
         block = min(256, max(1, int(settings["power_sample_interval_s"] * 1000 / max(latency_ms, 0.001))))
         with torch.inference_mode():
@@ -33,7 +42,9 @@ class PowerMeter:
                     for _ in range(block):
                         forward()
                     torch.cuda.synchronize(device)
+                    self.assert_idle()
                     samples.append((time.monotonic(), self.read_watts()))
+        self.assert_idle()
         # 仅保留第二段；第一段用于摆脱此前其他层/CPU 间隙的功率历史。
         elapsed = samples[-1][0] - samples[0][0]
         energy = sum((right[0] - left[0]) * (left[1] + right[1]) / 2

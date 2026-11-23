@@ -211,56 +211,22 @@ OneWeb 一代未采用星间链路，为其添加 +Grid 属于假设网络。One
 
 ## 4. 离线输入层：硬件性能 Profile
 
-### 4.1 测量范围与模型
+### 4.1 设计思路
 
-针对不同本地 LLM 权重和 CUDA GPU，逐个 decoder layer 测量 Prefill、Decode 执行时间与 PyTorch 显存占用。沿用原有 Profile 的真实权重单层微基准方式：每次仅在 GPU 保留一层权重，加载不进入计时区间，不要求整个模型能放入显存。
+Profile 使用本地模型和真实文本产生层输入，分别描述 Chunked Prefill 与 KV Cache 持续增长的 Decode。当前 Qwen2.5-7B-Instruct 选择首层、中间层和末层 `[0, 14, 27]` 作为同构 decoder layer 的代表；其余层仍执行一次以维持真实层间激活和各层 KV，不对未测层伪造结果。
 
-- 支持标准 dense Qwen2 / Qwen2.5 与 Qwen3 的多个规模，层数、隐藏维度、注意力头和 KV 头数量读取模型 `config.json`，不写死 7B 或 32B 参数。
-- 使用本地未量化 safetensors，可为单文件或索引分片；不下载模型、不执行模型仓库代码。
-- 不支持 MoE、滑动窗口、额外 RoPE scaling 或其他未适配结构，不静默以标准注意力代替。
-- 单层测量包含归一化、QKV 投影、RoPE、KV 写入、注意力、输出投影、MLP 与残差。不包含 embedding、最终归一化、LM head、采样和跨层传递；逐层数据不能直接视为完整模型的端到端实测结果。
+权重保存在 CPU，GPU 只驻留当前 decoder layer；所有层的 KV Cache 保留在 GPU。逐层计时不包含权重传输、Embedding、最终归一化和 LM Head。结果记录单层时延、整卡平均功率和进程峰值 GPU 已分配内存。
 
-### 4.2 Prefill 与 Decode 条件
+### 4.2 关键参数与实现路径
 
-**Chunked Prefill**
+- 模型：本地 Qwen2.5-7B-Instruct，BF16，28 个 dense decoder layers。
+- 数据：本地 ShareGPT，经模型聊天模板分词，不拼接请求；Prefill 取第一条长度至少 2048 token 的请求并裁为 2048 token，Decode 为 Batch Size 128 保留足量请求池。
+- Prefill：Batch Size 1，Chunk Size 为 `64 / 128 / 256 / 512`；每个 Chunk 保留其自然 `context_length`，历史 KV 与 RoPE 位置跨 Chunk 连续。
+- Decode：Batch Size 为 `1 / 32 / 64 / 128`，初始上下文为 `128 / 512 / 1024 / 2048`，每个组合连续 64 步且 KV 每步增长。
+- 测量：每个 case 预热 5 次、CUDA Event 采样 30 次；NVML 对固定 case 做稳态重复采样。
+- 输出：Prefill 和 Decode 分别保存 JSON，包含 `model_id`、`device_type`、`model_layers`、`latency_ms`、`avg_power_w` 和 `peak_memory_bytes`；已有结果不覆盖。
 
-- chunk size 为 `64 / 128 / 256 / 512` token。
-- 对每个层、每种 chunk size，从空 KV 开始，按整段输入顺序推进，逐块保留此前计算得到的 KV。
-- 位置编码从历史 KV 长度继续递增；有前缀的多 token chunk 使用右对齐因果 mask，禁止读取本块的未来 token。
-- 分别记录配置 chunk size、chunk 索引、实际 query token 数、历史 KV 长度与完整输入长度。最后不足一个块时按实际 token 数记录。
-- Prefill Batch Size 单独配置，微基准配置入口默认 1；完整输入长度由实验条件显式指定，不根据 chunk size 猜测。
-
-**Decode**
-
-- 按原 Profile 的参数含义，将 `1 / 32 / 64 / 128` 作为 Batch Size，每个请求每步处理一个 token。
-- 历史 KV 长度由独立列表指定，与 Batch Size 分开扫描；不将 Decode Batch Size 当作一次生成的 token 数。
-- 每个 case 测量相同上下文下的一步，不默认连续生成多个 token。
-
-输入数据方案尚待确定。提供可显式选择的 `synthetic_hidden_states` 单层微基准模式：Prefill 使用随机层输入，历史 KV 来自该层此前的块；Decode 使用随机层输入与随机历史 KV。该模式不代表文本数据集驱动的完整推理。默认不选择输入模式，模型路径、完整输入长度及 Decode 历史长度均保留待配置状态。
-
-### 4.3 计时、显存与运行边界
-
-- 固定入口读取 `configs/profile.yaml`，无 CLI 参数；相对路径以项目目录为基准。
-- 使用 PyTorch eager 与 SDPA 自动选择后端，CUDA events 计时；预热后采集重复样本，并同步后读取耗时。
-- 权重加载、输入与 KV 分配/初始化、mask 构造不计时。RoPE 计算、KV 原位写入与层内算子计时。
-- 同一 case 的预热与重复采样只覆盖当前 query 的 KV 槽，历史前缀和有效上下文不变。Prefill 测完一个块才推进下一块。
-- KV 使用预分配容量，Prefill 为完整输入长度，Decode 为历史长度加 1。显存记录常驻基线、峰值和峰值增量，包含单层权重、整段层输入、KV 容量与 mask；不是整模型显存，也不是 `nvidia-smi` 进程显存。
-- 默认检查目标 GPU 是否有其他计算进程，有则拒绝；不能可靠检查占用时同样拒绝，不自动终止任何进程。
-- 运行功率、能耗测量和 Profile 插值规则仍待确定，不生成估计功率或补造样本。
-
-### 4.4 离线测量记录
-
-每个模型独立保存到 `output_dir/<model>/`，已有目录一律拒绝覆盖：
-
-| 文件 | 内容 |
-| --- | --- |
-| `layers.csv` | 每层、每个 chunk / Decode case 的条件、样本数、均值、中位数、标准差、最小/最大时间（ms）及显存（MiB）。 |
-| `samples.jsonl` | 同一 case 的原始 CUDA event 耗时列表及层号、输入条件。 |
-| `metadata.json` | 完整配置、模型目录与配置、GPU / PyTorch / CUDA 环境、计时边界、输入与 KV 假设、功率测量标记和完成状态。 |
-
-CSV 的 case 条件包含 `phase`、`batch_size`、`prefill_total_tokens`、`chunk_size`、`chunk_index`、`query_tokens`、`cache_length`、`cache_capacity`；不适用于 Decode 的 Prefill 字段留空。时间字段为 `mean_ms`、`median_ms`、`stddev_ms`、`min_ms`、`max_ms`；显存字段为 `baseline_allocated_mib`、`peak_allocated_mib`、`peak_increment_mib`。
-
-失败运行可保留已完成的记录，但必须通过 metadata 的 `status: complete` 才能视为完整结果；`failed`、`running` 或缺失 metadata 均不能当作完整 Profile。输出为原始测量契约，不提前定义在线计算模块的查询、插值或功率接口。
+实现流程：读取本地模型与数据 → 构造真实层输入和 KV → 顺序执行全部层 → 测量代表层 → 保存 JSON。固定入口为 `python -m offline.profile`，参数见 [configs/profile.yaml](configs/profile.yaml)。
 
 ## 5. 策略层
 
@@ -332,8 +298,10 @@ satllm_simulator/
 │   ├── orbit.py              # Walker / TLE 初始化与轨道传播
 │   ├── topology.py           # +Grid、可用性与传播时延
 │   ├── generate_links.py     # 离线链路数据生成入口
-│   ├── decoder.py            # 支持的 decoder 算子、因果 mask 与逐层权重加载
-│   └── profile.py            # Chunked Prefill / Decode GPU 测量与持久化
+│   ├── decoder.py            # Decoder 算子、因果 mask 与真实权重读取
+│   ├── workload.py           # ShareGPT 选择、本地聊天模板分词与来源摘要
+│   ├── power.py              # NVML 稳态板卡功率采样
+│   └── profile.py            # 真实层间执行、连续 Decode、逐层测量与 JSON 输出
 ├── strategy/              # Serving 方式的部署与任务计划
 ├── execution/
 │   ├── simulator.py          # 统一时钟、事件队列与共享运行状态
@@ -357,7 +325,9 @@ satllm_simulator/
 | `offline/topology.py` | 卫星位置、轨道面分组、最大距离。 | 可用无向边及传播时延；不做文件 I/O。 |
 | `offline/generate_links.py` | 轨道配置。 | 串联传播、拓扑计算、事件差分，写出事件和 manifest。 |
 | `offline/decoder.py` | 支持的模型配置、单层权重、输入与 KV。 | 单层算子、KV 写入与因果注意力，不执行完整模型或文件输出。 |
-| `offline/profile.py` | 本地模型、CUDA 设备与测量条件。 | 顺序组织单层测量，保存时间、显存与元数据，不定义在线插值。 |
+| `offline/workload.py` | ShareGPT、本地 tokenizer 与取样规则。 | 真实 token 请求及可复现来源摘要。 |
+| `offline/power.py` | 固定层输入调用、NVML 与采样窗口。 | 稳态平均板卡功率，不推测缺失数据。 |
+| `offline/profile.py` | 本地模型、真实请求、CUDA 与测量条件。 | 真实层间传递与增长 KV，逐层测量时延/功率/显存，保存 JSON；不定义在线插值。 |
 | `strategy.py` | 请求负载、拓扑、运行状态和 Serving 方式。 | 计划计算流与传输流，不计算实际完成耗时。 |
 | `execution/transmission.py` | 计划传输流、链路事件、带宽和运行状态。 | 传输进度、完成事件及通信资源与能耗更新。 |
 | `execution/computation.py` | 计划计算流、Profile 和节点状态。 | 计算进度、完成事件及内存与能耗更新。 |
@@ -379,8 +349,8 @@ satllm_simulator/
 
 ```text
 模型 / GPU / 输入条件 → 配置校验与 GPU 占用检查
-  → [加载一层真实权重 → 顺序处理 Prefill chunks / 独立 Decode cases → CUDA 采样]
-  → 逐 case 记录时间 / 显存 / 原始样本 → 标记完成状态
+  → ShareGPT 分词 / 选择 → [真实层间执行 Prefill chunks / 连续 Decode steps]
+  → 逐层 CUDA 计时 / NVML 稳态采样 → JSON 时间 / 功率 / 显存 / 原始样本
 ```
 
 在线实验：
@@ -403,7 +373,7 @@ run_simulation
 
 - 计划计算流、传输流的字段和依赖关系；
 - 原“六个模块输入与输出”详细表；
-- Profile 的实际模型与设备集合、输入数据方案、完整输入长度、Decode 上下文长度、在线查询与插值规则；
+- Profile 的在线查询与插值规则，以及其他模型/设备的扩展实验配置；
 - 请求负载与在线实验配置格式、调度时隙及事件优先级；
 - 各 Serving 方式的具体调度算法；
 - 路由、带宽共享及断链处理规则；

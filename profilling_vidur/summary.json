@@ -1,0 +1,26 @@
+{
+  "prefill": {
+    "cases": 4,
+    "mape_percent": 6.294654909671184,
+    "mae_ms": 0.06698352088336837,
+    "rmse_ms": 0.07479110834613684,
+    "mean_signed_relative_error_percent": -2.959961715272007,
+    "max_absolute_relative_error_percent": 9.899406481650622
+  },
+  "decode": {
+    "cases": 4,
+    "mape_percent": 19.413063863244524,
+    "mae_ms": 0.14413829751778393,
+    "rmse_ms": 0.15316465238711816,
+    "mean_signed_relative_error_percent": 8.235275787065166,
+    "max_absolute_relative_error_percent": 22.355576152358715
+  },
+  "overall": {
+    "cases": 8,
+    "mape_percent": 12.853859386457852,
+    "mae_ms": 0.10556090920057615,
+    "rmse_ms": 0.12052618103240126,
+    "mean_signed_relative_error_percent": 2.63765703589658,
+    "max_absolute_relative_error_percent": 22.355576152358715
+  }
+}

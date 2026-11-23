@@ -1,12 +1,14 @@
 """ShareGPT 驱动的真实逐层 Profile：chunked Prefill 与 KV 持续增长的 Decode。"""
 
 import csv
+import importlib.metadata
 import json
 import os
 import platform
 import re
 import statistics
 import subprocess
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +17,7 @@ import yaml
 
 from .decoder import DecoderLayer, RMSNorm, WeightStore, causal_mask, read_model_config
 from .power import PowerMeter
+from .resume import decode_case, expected_records, load_resume, prefill_cases, record_key
 from .workload import load_workload
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +32,8 @@ def project_path(value):
 def validate_settings(settings):
     if not isinstance(settings, dict):
         raise ValueError("Profile 配置必须为 YAML 映射。")
-    for key in ("sample_requests", "max_input_tokens", "decode_steps", "decode_prefill_chunk_size", "repeats"):
+    for key in ("prefill_requests", "decode_requests", "max_input_tokens", "decode_steps",
+                "decode_prefill_chunk_size", "decode_prefill_batch_size", "repeats"):
         if type(settings.get(key)) is not int or settings[key] < 1:
             raise ValueError(f"{key} 必须为正整数。")
     if type(settings.get("warmup")) is not int or settings["warmup"] < 0:
@@ -39,7 +43,11 @@ def validate_settings(settings):
         if (not isinstance(values, list) or not values or len(set(values)) != len(values)
                 or any(type(value) is not int or value < 1 for value in values)):
             raise ValueError(f"{key} 必须为非空、无重复的正整数列表。")
-    if max(settings["decode_batch_sizes"]) > settings["sample_requests"]:
+    layers = settings.get("model_layers")
+    if (not isinstance(layers, list) or not layers or len(set(layers)) != len(layers)
+            or any(type(layer) is not int or layer < 0 for layer in layers)):
+        raise ValueError("model_layers 必须为非空、无重复的非负整数列表。")
+    if max(settings["decode_batch_sizes"]) > settings["decode_requests"]:
         raise ValueError("Decode batch size 不能超过每种上下文长度的请求池大小。")
     if max(settings["decode_context_lengths"]) > settings["max_input_tokens"]:
         raise ValueError("Decode 初始上下文长度不能超过 max_input_tokens。")
@@ -65,6 +73,8 @@ def validate_settings(settings):
             raise ValueError("模型名称只能包含英文字母、数字、点、下划线和连字符。")
         model_dir = project_path(directory)
         config = read_model_config(model_dir)
+        if max(settings["model_layers"]) >= config["num_hidden_layers"]:
+            raise ValueError(f"{name} 的 model_layers 超出模型层数。")
         if max(settings["max_input_tokens"], max(settings["decode_context_lengths"]) + settings["decode_steps"]) > config["max_position_embeddings"]:
             raise ValueError(f"{name} 的输入与生成长度超过模型位置编码上限。")
         selected[name] = (model_dir, config)
@@ -81,6 +91,9 @@ def gpu_environment(device):
     uuid = getattr(properties, "uuid", None)
     if not uuid:
         raise RuntimeError("无法确定目标 GPU UUID，停止测量。")
+    uuid = str(uuid)
+    if not uuid.startswith(("GPU-", "MIG-")):
+        uuid = "GPU-" + uuid
     try:
         command = ["nvidia-smi", f"--id={uuid}", "--query-compute-apps=pid,process_name,used_gpu_memory",
                    "--format=csv,noheader,nounits"]
@@ -96,6 +109,8 @@ def gpu_environment(device):
         "device": str(device), "device_type": properties.name, "uuid": str(uuid),
         "total_memory_bytes": properties.total_memory,
         "compute_capability": [properties.major, properties.minor], "other_compute_processes": others,
+        "dependencies": {name: importlib.metadata.version(name) for name in
+                         ("transformers", "safetensors", "nvidia-ml-py")},
     }
 
 
@@ -161,6 +176,8 @@ class StreamingModel:
 
 
 def benchmark_forward(forward, meter, device, settings):
+    started = datetime.now(timezone.utc).isoformat()
+    meter.assert_idle()
     for _ in range(settings["warmup"]):
         forward()
     torch.cuda.synchronize(device)
@@ -175,10 +192,14 @@ def benchmark_forward(forward, meter, device, settings):
     torch.cuda.synchronize(device)
     samples = [start.elapsed_time(end) for start, end in zip(starts, ends)]
     peak = torch.cuda.max_memory_allocated(device)
+    meter.assert_idle()
     latency = statistics.fmean(samples)
     power = meter.measure(forward, device, latency, settings)
     return {"latency_ms": latency, **power, "peak_memory_bytes": peak,
-            "baseline_memory_bytes": baseline, "latency_samples_ms": samples}
+            "baseline_memory_bytes": baseline, "latency_samples_ms": samples,
+            "measurement_started_at_utc": started,
+            "measurement_finished_at_utc": datetime.now(timezone.utc).isoformat(),
+            "occupancy_check": "compute+graphics at latency boundaries and each power replay block; no continuous-exclusivity guarantee"}
 
 
 def append_record(destination, record, first):
@@ -188,42 +209,57 @@ def append_record(destination, record, first):
     destination.flush()
 
 
-def run_prefill(model, requests, settings, record):
+def run_prefill(model, requests, settings, record, retained=None):
+    retained = retained or {}
     for chunk_size in settings["prefill_chunk_sizes"]:
         for request in requests:
+            cases = list(prefill_cases(request, chunk_size))
+            if all(record_key("prefill", layer, case) in retained
+                   for case in cases for layer in settings["model_layers"]):
+                continue
             tokens = request["input_ids"]
             caches = model.new_cache(1, len(tokens))
-            for chunk_index, offset in enumerate(range(0, len(tokens), chunk_size)):
+            for case in cases:
+                offset = case["context_length"]
                 ids = torch.tensor([tokens[offset:offset + chunk_size]], dtype=torch.long)
-                case = {"request_id": request["request_id"], "dataset_index": request["dataset_index"],
-                        "chunk_size": chunk_size, "chunk_index": chunk_index, "batch_size": 1,
-                        "input_length": len(tokens), "context_length": offset, "query_tokens": ids.shape[1]}
                 model.forward(ids, caches, offset, lambda index, operation: record(index, case, operation))
             del caches
             print(f"Prefill chunk={chunk_size}, request={request['dataset_index']} 完成", flush=True)
 
 
-def run_decode(model, pools, settings, record):
+def prepare_decode(model, ids, caches, settings):
+    # 仅初始化阶段分请求小批处理；各请求独立，不改变被测 Decode 的完整 batch。
+    tokens = []
+    microbatch = settings["decode_prefill_batch_size"]
+    chunk = settings["decode_prefill_chunk_size"]
+    for start in range(0, ids.shape[0], microbatch):
+        end = min(start + microbatch, ids.shape[0])
+        views = [(key[start:end], value[start:end]) for key, value in caches]
+        for offset in range(0, ids.shape[1], chunk):
+            hidden = model.forward(ids[start:end, offset:offset + chunk], views, offset)
+        tokens.append(model.next_token(hidden))
+        del hidden
+    return torch.cat(tokens)
+
+
+def run_decode(model, pools, settings, record, retained=None):
+    retained = retained or {}
     for context, requests in pools.items():
         for batch in settings["decode_batch_sizes"]:
+            cases = [decode_case(requests, batch, context, step) for step in range(settings["decode_steps"])]
+            if all(record_key("decode", layer, case) in retained
+                   for case in cases for layer in settings["model_layers"]):
+                continue
             chosen = requests[:batch]
             ids = torch.tensor([request["input_ids"] for request in chosen], dtype=torch.long)
             caches = model.new_cache(batch, context + settings["decode_steps"])
-            # 用真实请求、真实层间激活填满所有层的历史 KV，不将准备阶段计入 Decode。
-            for offset in range(0, context, settings["decode_prefill_chunk_size"]):
-                hidden = model.forward(ids[:, offset:offset + settings["decode_prefill_chunk_size"]], caches, offset)
-            token = model.next_token(hidden)
-            del hidden
-            for step in range(settings["decode_steps"]):
-                case = {"batch_size": batch, "initial_context_length": context,
-                        "context_length": context + step, "step": step, "query_tokens": 1,
-                        "request_ids": [request["request_id"] for request in chosen],
-                        "dataset_indices": [request["dataset_index"] for request in chosen]}
-                hidden = model.forward(token, caches, context + step,
+            token = prepare_decode(model, ids, caches, settings)
+            for case in cases:
+                hidden = model.forward(token, caches, case["context_length"],
                                        lambda index, operation: record(index, case, operation))
                 token = model.next_token(hidden)
                 del hidden
-                print(f"Decode batch={batch}, context={context + step}, step={step + 1}/{settings['decode_steps']} 完成", flush=True)
+                print(f"Decode batch={batch}, context={case['context_length']}, step={case['step'] + 1}/{settings['decode_steps']} 完成", flush=True)
             del caches
 
 
@@ -237,7 +273,7 @@ def profile_model(name, model_dir, config, settings, device, environment):
     paths = output_paths(name, environment["device_type"], settings)
     # 同目录的每阶段锁文件也用于标记硬中断后的不完整运行；不自动覆盖或删除。
     locks = {phase: path.with_suffix(".json.lock") for phase, path in paths.items()}
-    for path in [*paths.values(), *locks.values()]:
+    for path in [*paths.values(), *locks.values(), *(path.with_suffix(".json.partial") for path in paths.values())]:
         if path.exists():
             raise FileExistsError(f"已有结果或未完成运行不覆盖：{path}")
     for path in paths.values():
@@ -270,41 +306,71 @@ def profile_model(name, model_dir, config, settings, device, environment):
     try:
         prefill, decode, dataset = load_workload(project_path(settings["dataset"]), model_dir, settings)
         metadata["dataset"] = dataset
+        expected = expected_records(prefill, decode, settings)
+        retained = {}
+        if settings.get("resume_from"):
+            resume_path = project_path(settings["resume_from"])
+            sources = ({phase: resume_path for phase in paths} if resume_path.is_file()
+                       else output_paths(name, environment["device_type"], settings | {"output_dir": settings["resume_from"]}))
+            retained, audit = load_resume(sources, name, config, settings, environment, dataset, expected)
+            metadata["resume"] = audit
+            print(f"复用 {len(retained)} 条；待补测 {len(expected) - len(retained)} 条。", flush=True)
         if settings["dtype"] == "bfloat16" and not torch.cuda.is_bf16_supported():
             raise RuntimeError("目标 GPU 不支持 BF16。")
         meter = PowerMeter(environment["uuid"])
+        meter.assert_idle()
         model = StreamingModel(model_dir, config, device, DTYPES[settings["dtype"]])
         for phase, path in temporary.items():
             files[phase] = path.open("x", encoding="utf-8")
             files[phase].write('{"records":[\n')
-        def record(phase, index, case, operation):
-            values = benchmark_forward(operation, meter, device, settings)
-            row = {"model_id": name, "device_type": environment["device_type"],
-                   "model_layers": [index], **case, **values}
+        completed = set(retained)
+        for key, row in retained.items():
+            phase = key[0]
             append_record(files[phase], row, counts[phase] == 0)
             counts[phase] += 1
+        measured_layers = set(settings["model_layers"])
+        def record(phase, index, case, operation):
+            key = record_key(phase, index, case)
+            if index not in measured_layers or key in completed:
+                return
+            metadata["active_measurement"] = {"phase": phase, "model_layers": [index], **case}
+            values = benchmark_forward(operation, meter, device, settings)
+            row = {"model_id": name, "device_type": environment["device_type"],
+                   "model_layers": [index], **case, **values,
+                   "measurement_source": {"run_started_at_utc": metadata["started_at_utc"],
+                                          "environment": environment}}
+            append_record(files[phase], row, counts[phase] == 0)
+            counts[phase] += 1
+            completed.add(key)
+            metadata.pop("active_measurement", None)
         with torch.inference_mode():
-            run_prefill(model, prefill, settings, lambda *args: record("prefill", *args))
-            run_decode(model, decode, settings, lambda *args: record("decode", *args))
+            run_prefill(model, prefill, settings, lambda *args: record("prefill", *args), completed)
+            run_decode(model, decode, settings, lambda *args: record("decode", *args), completed)
+        if completed != set(expected):
+            raise RuntimeError("续测结果缺少预期 case，不能标记为 complete。")
         status = "complete"
     except BaseException as error:
         failure = f"{type(error).__name__}: {error}"
         raise
     finally:
-        metadata.update(status=status, error=failure, completed_records=counts,
-                        finished_at_utc=datetime.now(timezone.utc).isoformat())
-        for phase, destination in files.items():
-            destination.write('],"metadata":')
-            json.dump(metadata | {"phase": phase}, destination, ensure_ascii=False, allow_nan=False)
-            destination.write("}\n")
-            destination.close()
-            # 硬链接发布不覆盖，即使其他进程在检查后创建了目标文件也会失败。
-            os.link(temporary[phase], paths[phase])
-            temporary[phase].unlink()
-        if meter is not None:
-            meter.close()
-        for path in acquired:
-            path.unlink()
+        # 即使 JSON 收尾或发布失败，也关闭所有文件、释放 NVML 和本次取得的锁。
+        with ExitStack() as cleanup:
+            for path in acquired:
+                cleanup.callback(path.unlink)
+            if meter is not None:
+                cleanup.callback(meter.close)
+            for destination in files.values():
+                cleanup.callback(destination.close)
+            metadata.update(status=status, error=failure, completed_records=counts,
+                            finished_at_utc=datetime.now(timezone.utc).isoformat())
+            for phase, destination in files.items():
+                destination.write('],"metadata":')
+                json.dump(metadata | {"phase": phase}, destination, ensure_ascii=False, allow_nan=False)
+                destination.write("}\n")
+                destination.close()
+                # 硬链接发布不覆盖，即使其他进程在检查后创建了目标文件也会失败。
+                os.link(temporary[phase], paths[phase])
+                temporary[phase].unlink()
     return paths
 
 

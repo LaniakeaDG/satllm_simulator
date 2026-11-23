@@ -3,14 +3,19 @@ models:
   Qwen2.5-7B-Instruct: /mnt/data/zdg/models/Qwen2.5-7B-Instruct
 
 dataset: datasets/ShareGPT/ShareGPT_V3_unfiltered_cleaned_split.json
-sample_requests: 128
+prefill_requests: 1
+decode_requests: 128
 max_input_tokens: 2048
 prefill_chunk_sizes: [64, 128, 256, 512]
 decode_batch_sizes: [1, 32, 64, 128]
 decode_context_lengths: [128, 512, 1024, 2048]
 decode_steps: 64
+# 28 层模型只测量首层、中间层和末层；其他层仍真实执行以传递激活并维护 KV。
+model_layers: [0, 14, 27]
 # 仅用于构建 Decode 初始 KV，不作为 Decode 测量记录。
 decode_prefill_chunk_size: 512
+# 初始 KV 准备按请求分批，测量阶段仍使用完整 Decode batch。
+decode_prefill_batch_size: 8
 
 device: cuda:0
 dtype: bfloat16
@@ -20,4 +25,6 @@ repeats: 30
 power_settle_s: 1.0
 power_measure_s: 1.0
 power_sample_interval_s: 0.02
-output_dir: data/profiles
+# 合并结果只读；再次测量的阶段文件写到 raw/，不覆盖正式 profile.json。
+resume_from: data/profiles/profile.json
+output_dir: data/profiles/raw
