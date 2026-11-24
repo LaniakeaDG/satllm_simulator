@@ -6,26 +6,26 @@
       {
         "task_id": "r1:local:prefill",
         "request_id": "r1",
-        "task_type": "prefill",
+        "task_type": "layer_compute",
+        "phase": "prefill",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": null,
-        "end_layer": null
+        "start_layer": 0,
+        "end_layer": 2
       },
       {
         "task_id": "r1:local:decode_step_1",
         "request_id": "r1",
-        "task_type": "decode",
+        "task_type": "layer_compute",
+        "phase": "decode",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": null,
-        "end_layer": null
+        "start_layer": 0,
+        "end_layer": 2
       }
     ],
     "depends_on": {
@@ -42,34 +42,37 @@
       {
         "task_id": "r1:pd:prefill",
         "request_id": "r1",
-        "task_type": "prefill",
+        "task_type": "layer_compute",
+        "phase": "prefill",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": null,
-        "end_layer": null
+        "start_layer": 0,
+        "end_layer": 2
       },
       {
         "task_id": "r1:pd:kv_transfer",
         "request_id": "r1",
-        "task_type": "kv_transfer",
+        "task_type": "transfer",
+        "phase": "prefill",
+        "decode_step": 0,
+        "data_type": "kv",
         "src": 4,
         "dst": 9,
-        "data_size": null
+        "data_size": 200
       },
       {
         "task_id": "r1:pd:decode_step_1",
         "request_id": "r1",
-        "task_type": "decode",
+        "task_type": "layer_compute",
+        "phase": "decode",
         "node_id": 9,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": null,
-        "end_layer": null
+        "start_layer": 0,
+        "end_layer": 2
       }
     ],
     "depends_on": {
@@ -89,19 +92,22 @@
       {
         "task_id": "r1:prefill_0",
         "request_id": "r1",
-        "task_type": "prefill",
+        "task_type": "layer_compute",
+        "phase": "prefill",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
         "start_layer": 0,
         "end_layer": 1
       },
       {
         "task_id": "r1:activation_transfer_0_1",
         "request_id": "r1",
-        "task_type": "activation_transfer",
+        "task_type": "transfer",
+        "phase": "prefill",
+        "decode_step": 0,
+        "data_type": "activation",
         "src": 4,
         "dst": 9,
         "data_size": 48
@@ -109,19 +115,22 @@
       {
         "task_id": "r1:prefill_1",
         "request_id": "r1",
-        "task_type": "prefill",
+        "task_type": "layer_compute",
+        "phase": "prefill",
         "node_id": 9,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
         "start_layer": 1,
         "end_layer": 2
       },
       {
         "task_id": "r1:decode_step_1_token_transfer",
         "request_id": "r1",
-        "task_type": "token_transfer",
+        "task_type": "transfer",
+        "phase": "decode",
+        "decode_step": 1,
+        "data_type": "token",
         "src": 9,
         "dst": 4,
         "data_size": 8
@@ -129,19 +138,22 @@
       {
         "task_id": "r1:decode_step_1_stage_0",
         "request_id": "r1",
-        "task_type": "decode",
+        "task_type": "layer_compute",
+        "phase": "decode",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
         "start_layer": 0,
         "end_layer": 1
       },
       {
         "task_id": "r1:decode_step_1_activation_transfer_0_1",
         "request_id": "r1",
-        "task_type": "activation_transfer",
+        "task_type": "transfer",
+        "phase": "decode",
+        "decode_step": 1,
+        "data_type": "activation",
         "src": 4,
         "dst": 9,
         "data_size": 16
@@ -149,12 +161,12 @@
       {
         "task_id": "r1:decode_step_1_stage_1",
         "request_id": "r1",
-        "task_type": "decode",
+        "task_type": "layer_compute",
+        "phase": "decode",
         "node_id": 9,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
         "start_layer": 1,
         "end_layer": 2
       }
@@ -188,31 +200,37 @@
       {
         "task_id": "r1:tp_prefill_layer_0_attention_rank_0",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:tp_prefill_layer_0_attention_rank_1",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:tp_prefill_layer_0_attention_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -225,31 +243,37 @@
       {
         "task_id": "r1:tp_prefill_layer_0_mlp_rank_0",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:tp_prefill_layer_0_mlp_rank_1",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:tp_prefill_layer_0_mlp_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -262,31 +286,37 @@
       {
         "task_id": "r1:tp_prefill_layer_1_attention_rank_0",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:tp_prefill_layer_1_attention_rank_1",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:tp_prefill_layer_1_attention_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -299,31 +329,37 @@
       {
         "task_id": "r1:tp_prefill_layer_1_mlp_rank_0",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:tp_prefill_layer_1_mlp_rank_1",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:tp_prefill_layer_1_mlp_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -337,6 +373,8 @@
         "task_id": "r1:tp_decode_step_1_broadcast",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "broadcast",
         "participants": [
           4,
@@ -349,31 +387,37 @@
       {
         "task_id": "r1:tp_decode_step_1_layer_0_attention_rank_0",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:tp_decode_step_1_layer_0_attention_rank_1",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:tp_decode_step_1_layer_0_attention_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -386,31 +430,37 @@
       {
         "task_id": "r1:tp_decode_step_1_layer_0_mlp_rank_0",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:tp_decode_step_1_layer_0_mlp_rank_1",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:tp_decode_step_1_layer_0_mlp_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -423,31 +473,37 @@
       {
         "task_id": "r1:tp_decode_step_1_layer_1_attention_rank_0",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:tp_decode_step_1_layer_1_attention_rank_1",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:tp_decode_step_1_layer_1_attention_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -460,31 +516,37 @@
       {
         "task_id": "r1:tp_decode_step_1_layer_1_mlp_rank_0",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:tp_decode_step_1_layer_1_mlp_rank_1",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:tp_decode_step_1_layer_1_mlp_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -584,31 +646,37 @@
       {
         "task_id": "r1:hybrid_prefill_stage_0_layer_0_attention_rank_0",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:hybrid_prefill_stage_0_layer_0_attention_rank_1",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:hybrid_prefill_stage_0_layer_0_attention_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -621,31 +689,37 @@
       {
         "task_id": "r1:hybrid_prefill_stage_0_layer_0_mlp_rank_0",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:hybrid_prefill_stage_0_layer_0_mlp_rank_1",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:hybrid_prefill_stage_0_layer_0_mlp_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -658,7 +732,10 @@
       {
         "task_id": "r1:hybrid_prefill_stage_1_activation_transfer",
         "request_id": "r1",
-        "task_type": "activation_transfer",
+        "task_type": "transfer",
+        "phase": "prefill",
+        "decode_step": 0,
+        "data_type": "activation",
         "src": 4,
         "dst": 9,
         "data_size": 48
@@ -667,6 +744,8 @@
         "task_id": "r1:hybrid_prefill_stage_1_activation_broadcast",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
         "collective_type": "broadcast",
         "participants": [
           9,
@@ -679,31 +758,37 @@
       {
         "task_id": "r1:hybrid_prefill_stage_1_layer_1_attention_rank_0",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 9,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:hybrid_prefill_stage_1_layer_1_attention_rank_1",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 8,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:hybrid_prefill_stage_1_layer_1_attention_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
         "collective_type": "all_reduce",
         "participants": [
           9,
@@ -716,31 +801,37 @@
       {
         "task_id": "r1:hybrid_prefill_stage_1_layer_1_mlp_rank_0",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 9,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:hybrid_prefill_stage_1_layer_1_mlp_rank_1",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 8,
         "batch_size": 1,
         "input_tokens": 3,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:hybrid_prefill_stage_1_layer_1_mlp_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
         "collective_type": "all_reduce",
         "participants": [
           9,
@@ -753,7 +844,10 @@
       {
         "task_id": "r1:hybrid_decode_step_1_stage_0_token_transfer",
         "request_id": "r1",
-        "task_type": "token_transfer",
+        "task_type": "transfer",
+        "phase": "decode",
+        "decode_step": 1,
+        "data_type": "token",
         "src": 9,
         "dst": 4,
         "data_size": 8
@@ -762,6 +856,8 @@
         "task_id": "r1:hybrid_decode_step_1_stage_0_token_broadcast",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "broadcast",
         "participants": [
           4,
@@ -774,31 +870,37 @@
       {
         "task_id": "r1:hybrid_decode_step_1_stage_0_layer_0_attention_rank_0",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:hybrid_decode_step_1_stage_0_layer_0_attention_rank_1",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:hybrid_decode_step_1_stage_0_layer_0_attention_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -811,31 +913,37 @@
       {
         "task_id": "r1:hybrid_decode_step_1_stage_0_layer_0_mlp_rank_0",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 4,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:hybrid_decode_step_1_stage_0_layer_0_mlp_rank_1",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 5,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 0,
-        "end_layer": 1
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:hybrid_decode_step_1_stage_0_layer_0_mlp_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "all_reduce",
         "participants": [
           4,
@@ -848,7 +956,10 @@
       {
         "task_id": "r1:hybrid_decode_step_1_stage_1_activation_transfer",
         "request_id": "r1",
-        "task_type": "activation_transfer",
+        "task_type": "transfer",
+        "phase": "decode",
+        "decode_step": 1,
+        "data_type": "activation",
         "src": 4,
         "dst": 9,
         "data_size": 16
@@ -857,6 +968,8 @@
         "task_id": "r1:hybrid_decode_step_1_stage_1_activation_broadcast",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "broadcast",
         "participants": [
           9,
@@ -869,31 +982,37 @@
       {
         "task_id": "r1:hybrid_decode_step_1_stage_1_layer_1_attention_rank_0",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 9,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:hybrid_decode_step_1_stage_1_layer_1_attention_rank_1",
         "request_id": "r1",
-        "task_type": "tp_attention",
+        "task_type": "operation_compute",
         "node_id": 8,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:hybrid_decode_step_1_stage_1_layer_1_attention_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "all_reduce",
         "participants": [
           9,
@@ -906,31 +1025,37 @@
       {
         "task_id": "r1:hybrid_decode_step_1_stage_1_layer_1_mlp_rank_0",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 9,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
       },
       {
         "task_id": "r1:hybrid_decode_step_1_stage_1_layer_1_mlp_rank_1",
         "request_id": "r1",
-        "task_type": "tp_mlp",
+        "task_type": "operation_compute",
         "node_id": 8,
         "batch_size": 1,
         "input_tokens": 1,
         "context_tokens": 3,
-        "num_layers": null,
-        "start_layer": 1,
-        "end_layer": 2
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
       },
       {
         "task_id": "r1:hybrid_decode_step_1_stage_1_layer_1_mlp_all_reduce",
         "request_id": "r1",
         "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
         "collective_type": "all_reduce",
         "participants": [
           9,
