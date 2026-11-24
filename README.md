@@ -1,6 +1,6 @@
 # 卫星 LLM Serving 仿真平台设计
 
-本文描述平台的总体架构、模块职责、数据约定和整体代码框架，不记录开发过程、实现进度或运行验证结果。项目范围与实现原则见 [CLAUDE.md](CLAUDE.md)，运行说明见 [README.md](README.md)。
+本文描述平台架构、模块职责与使用方法。策略层实现进度与验收范围见第 5 节。项目范围与实现原则见 [AGENTS.md](AGENTS.md)。
 
 ## 1. 总体架构
 
@@ -230,6 +230,8 @@ Profile 使用本地模型和真实文本产生层输入，分别描述 Chunked 
 
 ## 5. 策略层
 
+**实现进度**：Local、PD、PP、TP 和 Hybrid 已完成第一版单请求规划及统一 Plan 输出。验收覆盖三个任务类型的字段、两个请求分别运行五种策略时的 ID 与可变数据隔离、拓扑顺序、All-Reduce 的多前驱依赖，以及单 Token 输出、单 Stage 和准入失败分支。从项目根目录运行 `python -B -m unittest discover -s tests -v` 可复验。
+
 策略层根据请求负载、动态网络拓扑和预设的 LLM Serving 方式，确定请求的部署与执行方案。
 
 | 执行方式 | 定义 |
@@ -242,9 +244,195 @@ Profile 使用本地模型和真实文本产生层输入，分别描述 Chunked 
 
 策略负责节点选择、模型部署、任务分配、Batch 组织和执行顺序，输出每个时隙计划执行的计算流与传输流（Slot-level Data Flows），不直接计算实际执行耗时。
 
-计算流与传输流的字段、具体策略算法及不同并行方式的通信依赖需另行明确。
+### 5.1 单请求 PP 调用流程
+
+从项目根目录运行以下 Python 示例。权重、预算和时延为可手算的测试数据，实际实验应提供对应模型、设备和测量条件的数据。
+
+```python
+from strategy import Request, assemble_plan, build_pp_stages_for_request, plan_pp_decode, plan_pp_prefill
+
+request = Request(request_id="r1", arrival_time=0, input_length=3, output_length=3,
+                  service_requirements=None)
+model = {
+    "num_hidden_layers": 4, "layer_weight_bytes": [10, 10, 10, 10],
+    "profile_case": "synthetic-b1",
+    "layer_latency_ms_by_device": {"A": [1, 1, 9, 9], "B": [9, 9, 1, 9], "C": [9, 9, 9, 1]},
+    "num_key_value_heads": 1, "head_dim": 2, "kv_cache_dtype": "bfloat16",
+    "hidden_size": 8, "activation_dtype": "float32",
+}
+nodes = [
+    {"sat_id": 42, "device_type": "A", "weight_memory_budget_bytes": 20, "total_memory_budget_bytes": 100},
+    {"sat_id": 3, "device_type": "B", "weight_memory_budget_bytes": 10, "total_memory_budget_bytes": 50},
+    {"sat_id": 19, "device_type": "C", "weight_memory_budget_bytes": 10, "total_memory_budget_bytes": 50},
+]
+links = {(3, 42): 2.5, (3, 19): 1.8, (19, 42): 3.0}
+stages = build_pp_stages_for_request(model, nodes, request=request, active_links=links)
+prefill = plan_pp_prefill(request, stages, model)
+decode = plan_pp_decode(request, stages, model)
+plan = assemble_plan("pp", request, prefill, decode)
+```
+
+示例划分依次为卫星 42 的 `[0,2)`、卫星 3 的 `[2,3)`、卫星 19 的 `[3,4)`。Prefill 有 5 个任务，随后两轮 Decode 各有 6 个任务。第一轮的 Token Transfer 从 19 返回 42，其直接前驱是 `r1:prefill_2`。Prefill 和每轮 Decode 的 Activation 都按 42 → 3 → 19 传递，每段负载分别为 96 和 32 字节，每次返回 Token 为 8 字节。
+
+### 5.2 输入与输出
+
+五种策略的单请求正式输出均包含 `request_id`、`strategy`、按拓扑顺序排列的 `tasks`，以及记录每项任务直接前驱的 `depends_on`。Local 和 PD 传入一个完整规划，组装时将短 ID 改为 `{request_id}:{strategy}:{原 task_id}`，依赖同步改名。
+
+```python
+from strategy import assemble_plan, plan_local_request, plan_pd_request_at
+
+local = assemble_plan("local", request, plan_local_request(request, node_id))
+pd_part = plan_pd_request_at(request, prefill_candidates, decode_candidates,
+                             decision_time_s=now_s, topology_provider=query_links)
+pd = None if pd_part is None else assemble_plan("pd", request, pd_part)
+```
+
+示例中的 `now_s` 是执行层发起本次决策时的仿真秒数，与离线链路的 `time_s` 共用起点。`query_links` 是调用方注入的函数，未来可传入 transmission 的绑定方法。它须返回该时刻完整的有效链路字典，键为严格升序的卫星编号对，值为传播时延（ms）。查询失败应抛出异常；PD 校验快照后按原规则选点。有效快照中没有直连候选对时返回 `None`。已知部署节点的调用方仍可直接使用 `plan_pd_request(request, prefill_node, decode_node)`。
+
+PP、TP 和 Hybrid 依次传入 Prefill 和 Decode 规划结果，即使 Decode 没有任务也传入该片段。组装保留原任务 ID，遇到请求 ID 不一致、重复任务或依赖键、依赖不完整或顺序错误时抛出 `ValueError`。五种策略在同一合成请求下的完整输出见 [Plan 示例](examples/strategy_plans.json)。
+
+调用方应使用同一策略、请求参数和部署生成所有片段。片段只携带请求 ID、任务和依赖。组装函数检查图结构，无法据此认证片段来源或 Decode 轮数。例如，将一对有效的 TP 片段标记为 PP，或给需要 Decode 的请求传入结构合法的空 Decode，均可能通过组装。
+
+请求级部署检查发生在规划之前。PP 划分失败会抛出异常；TP 和 Hybrid 调用方须检查 `assessment["feasible"]`，只在通过时生成片段并组装。单独调用 `assemble_plan` 不会重新评估部署。Local 直接使用指定节点，PD 可使用现有 `select_pd_nodes` 选点。
+
+| 输入 | 字段及含义 |
+| --- | --- |
+| 请求 | 非空字符串 `request_id`、数值 `arrival_time`、正整数 `input_length` 和 `output_length`、`service_requirements`。输出长度包含 Prefill 产生的首个 Token；当前搜索使用请求长度。 |
+| 模型与 Profile | `num_hidden_layers` 给出模型层数，`layer_weight_bytes` 为各层权重字节数。`profile_case` 标识选定的测量条件，`layer_latency_ms_by_device` 按设备类型提供该条件下每一层的计算时延（ms）。 |
+| KV 与 Activation | `num_key_value_heads`、`head_dim`、`kv_cache_dtype` 用于 KV 准入；发生 Activation Transfer 时另需 `hidden_size` 和 `activation_dtype`。推理批大小为 1。 |
+| 候选节点 | 唯一的非负整数 `sat_id`，与 Profile 匹配的 `device_type`，独立权重上限 `weight_memory_budget_bytes`，以及扣除其他固定预留后供逐层权重与该请求 KV 共用的 `total_memory_budget_bytes`。 |
+| 链路快照 | `active_links` 的键为无向端点对，值为有限非负传播时延（ms）。搜索只检查边是否存在。空字典仅允许单 Stage；缺失快照或传入 `None` 会报错。 |
+
+`build_pp_stages(model_info, candidate_nodes)` 按权重预算和指定 Profile 划分；需要请求 KV 与快照准入时，使用示例中的 `build_pp_stages_for_request()`。两者均最小化最大 Stage 的逐层计算时延之和，同瓶颈时优先较少 Stage。输出均为有序字典列表，字段为 `stage_id, node_id, start_layer, end_layer`。两种任务规划器都可直接消费该列表。非法资源输入抛出 `ValueError`，合法输入无可行完整划分时抛出 `RuntimeError`。
+
+每个阶段返回 `request_id, tasks, depends_on`。计算和传输任务均含 `task_id, request_id, task_type`。计算任务另含 `node_id, start_layer, end_layer, batch_size, input_tokens, context_tokens, num_layers`，其中层区间左闭右开，`num_layers` 保留为 `None`。传输任务另含 `src, dst, data_size`，单位为字节。`depends_on` 将任务 ID 映射到直接前驱 ID 列表，首个 Prefill 对应空列表。Decode 的第一个前驱来自同一请求的 Prefill 计划，因此应传入同一份完整 Stage 划分。
+
+多 Stage 的每对相邻节点都需要直连边。当 `output_length > 1` 时，末节点和首节点还需直连，每轮 Decode 开始前返回一个 Token。单 Stage 只有计算任务。`output_length=1` 时无需返回边，Decode 的任务列表和依赖映射均为空。
+
+### 5.3 字节口径与资源边界
+
+| 对象 | 单请求计算口径 |
+| --- | --- |
+| Stage 的峰值 KV | `pp_stage_kv_bytes(model, request, stage)` 返回 `2 × Stage 层数 × (input_length + output_length - 1) × num_key_value_heads × head_dim × KV 元素字节数`。K 和 V 各一份，Prefill 与后续 Decode 共用。 |
+| Stage 内存准入 | `pp_stage_fits_memory(model, request, stage, node)` 返回布尔值。区间权重须满足独立权重上限，权重加峰值 KV 须满足合计上限，等于上限时通过。 |
+| Activation Transfer | 每次为 `token 数 × hidden_size × Activation 元素字节数`。Prefill 取完整输入长度，Decode 每轮取 1。KV 和 Activation 独立指定 dtype；两者均支持 float16、bfloat16（2 字节）和 float32（4 字节）。 |
+| Token Transfer | 每次为一个生成的 int64 Token ID，共 8 字节，与隐藏维度和浮点 dtype 无关。 |
+
+内存准入仅覆盖已提供的逐层权重和紧凑 KV。Embedding、最终 Norm、LM Head 等未计入逐层权重的驻留内存，以及激活缓冲、算子临时工作区和分配器开销，需要调用方另行核算并预留。传输字节数只描述负载，不能据此推断峰值显存或完成时间。
+
+精确划分搜索的规模随候选卫星数量指数增长。结果适用于给定请求、Profile case 和直连快照；带宽、协议开销、路由、链路后续变化、多请求竞争和执行耗时均在本次规划范围之外。手工截短 Stage 列表时，任务规划器也无法独立识别缺失的尾层，完整覆盖应由划分器保证。
+
+### 5.4 固定 TP Group 的单请求规划
+
+`plan_tp_prefill(request, tp_group, model_info)` 和 `plan_tp_decode(request, tp_group, model_info)` 返回 `request_id, tasks, depends_on`。两阶段使用同一请求、同一有序卫星组和同一模型信息。组中至少需要两颗不同的卫星，首节点是 Rank 0。模型须提供正整数 `num_hidden_layers`、`hidden_size`，以及 `activation_dtype`（float16、bfloat16 或 float32）。
+
+每层分别对 Attention 和 MLP 做列并行与行并行的局部计算抽象。每一段中，各 Rank 的计算任务共享同一个前置条件，可以并行执行。随后的求和 All-Reduce 等待本段所有 Rank 完成，归约结果再供下一段或下一层使用。每个 All-Reduce 对应一个 `CollectiveTask`，其 `participants` 保留 Rank 顺序，`layer_id` 从 0 起算。`data_size` 记录逻辑张量的字节数，Prefill 为输入长度 × 隐藏维度 × 元素字节数，每轮 Decode 为隐藏维度 × 元素字节数。
+
+Rank 0 负责抽象的 Token Sampling。每轮 Decode 以一次 8 字节 int64 Token 广播开始，`layer_id=None`、`root=tp_group[0]`（卫星编号）。All-Reduce 的 `root=None`。第一轮广播依赖 Prefill 最后一层的 MLP All-Reduce，其余广播依赖上一轮最后一层的 MLP All-Reduce。输出长度为 1 时 Decode 计划为空。
+
+### 5.5 单请求 TP 的部署准入与完整任务计划
+
+调用方准备统一 `request`、含完整权重清单的 `model_info`、有序卫星列表 `tp_group`、各卫星预算 `node_resources` 和同一时刻的链路快照 `active_links`。先评估该请求能否部署，再用通过准入的 Rank 顺序生成两个阶段的任务。
+
+```python
+from strategy import assemble_plan, assess_tp_group, plan_tp_prefill, plan_tp_decode
+
+assessment = assess_tp_group(request, tp_group, model_info, node_resources,
+                             active_links=active_links)
+plan = None
+if assessment["feasible"]:
+    ranks = assessment["participants"]
+    prefill = plan_tp_prefill(request, ranks, model_info)
+    decode = plan_tp_decode(request, ranks, model_info)
+    plan = assemble_plan("tp", request, prefill, decode)
+```
+
+准入失败时，`plan` 为 `None`，原因在 `assessment["reasons"]` 中。准入成功时，合并后的 `depends_on` 可直接解析首轮 Broadcast 对 Prefill 末层 MLP All-Reduce 的引用。任务列表按拓扑顺序排列，同一段各 Rank 的局部计算可并行开始；每次 All-Reduce 等待该段全部 Rank。若 `output_length=1`，合并结果仅含 Prefill。
+
+验收用例使用两层、17 个输入 Token、`hidden_size=16` 和 float32 Activation。四颗卫星按 `[42, 3, 19, 7]` 排列，组内链式连通。当 `output_length=3` 时，Prefill 有 20 个任务，两轮 Decode 各有 21 个，合计 62 个。Prefill 和 Decode 的每次 All-Reduce 逻辑负载分别为 1088 和 64 字节；每轮 Decode 开始时由卫星 42 广播一个 8 字节 Token ID。
+
+在 5.4 的模型字段上增加 `model_type`、`num_attention_heads`、`num_key_value_heads`、`head_dim`、`intermediate_size`、`kv_cache_dtype` 和 `weight_tensors`。当前权重清单按项目支持的标准未量化 dense Qwen2/2.5（`qwen2`）和 Qwen3（`qwen3`）参数名核对。TP 准入要求 `hidden_size == num_attention_heads * head_dim`。Query 头、KV 头和 MLP 中间通道须分别能被组大小 P 整除，Query 头数也须能被 KV 头数整除。每个 Rank 参与所有层并保留完整的 head 维度。
+
+`weight_tensors` 必须由调用方按实际部署补齐，每项字段如下。例如两 Rank 部署中的一条 Q 投影记录可以是：
+
+```python
+{"name": "model.layers.0.self_attn.q_proj.weight", "layer_id": 0, "shape": [16, 16],
+ "storage_dtype": "float16", "split_axis": 0, "resident_ranks": [0, 1],
+ "storage_id": "layer0.q.weight"}
+```
+
+- `name` 是完整 checkpoint 参数名；`layer_id` 为从 0 起算的层号，层外为 `None`。`shape` 填切分前形状。每个张量显式提供部署存储精度 `float16`、`bfloat16` 或 `float32`。清单须含全部层和三项层外权重，不能只提供层权重总数或 Profile 显存峰值。
+- PyTorch Linear 权重布局为 `[out, in]`。Q/K/V 和 gate/up 沿轴 0 切分，o/down 沿轴 1 切分。Qwen2 的 Q/K/V bias 随输出分片。两处层内 RMSNorm 及 Qwen3 的 Q/K Norm 在每个 Rank 复制，显式填 `split_axis=None`。
+- `resident_ranks` 是实际保存该张量的 **Rank 索引**。层内张量覆盖所有 Rank。层外 `model.embed_tokens.weight`、`model.norm.weight`、`lm_head.weight` 分别指定保存整份权重的 Rank，显式填 `split_axis=None`。本阶段的切分范围是 decoder 层内的 Attention 和 MLP。
+- 同一物理权重在多个名字下共享时使用相同 `storage_id`，独立副本使用不同 ID。仅支持形状、精度、切分布局相同的整张量别名。每个 Rank 单独去重；明细按层号、层内参数顺序、最后层外权重的顺序归属，与输入清单的顺序无关。
+
+`node_resources` 为按卫星编号索引的字典，例如 `{42: {"weight_memory_budget_bytes": 1480, "total_memory_budget_bytes": 1816}, ...}`。每 Rank 的权重总量分别计入本地分片、完整复制参数和层外驻留权重。成功均分 KV 头后，单请求峰值 KV 等于覆盖全部层的紧凑 KV 字节数除以 P，容量沿用 `input_length + output_length - 1`。权重须满足权重预算，权重加 KV 须满足总预算。激活缓冲、集合通信工作区与框架开销由调用方在总预算中预留。
+
+`active_links` 与 PP 使用相同的无向快照格式。准入要求仅由组内成员和成员之间的边构成的图连通，链式连接可行。空快照有效但不连通，缺失或 `None` 属于输入错误。Prefill 的 All-Reduce 与 Decode 的 Broadcast 采用同一连通条件。
+
+返回字典的 `participants` 保留 Rank 顺序，`connected` 表示快照连通性，`feasible` 和 `reasons` 给出整体结论。`ranks` 中逐项含 `rank, node_id, weight_bytes, kv_bytes, weight_fits, total_fits`，以及按层列出的本地 `layer_shard_bytes, layer_replicated_bytes` 和层外 `outside_weight_bytes`。均分条件失败时返回空的 `ranks`；预算不足或拓扑不连通时仍可查看有效的内存明细。缺失或矛盾的输入抛出 `ValueError`。这些结果仅针对声明的部署和快照，不代表整卡实测峰值或通信完成时间。
+
+### 5.6 固定 Hybrid 部署准入
+
+`assess_hybrid_deployment(request, stages, model_info, node_resources, active_links=links)` 检查一个请求的固定 PP 层划分和各段的 TP Group。下面的部署覆盖三层模型，两个 Stage 分别使用两颗和四颗卫星。
+
+```python
+stages = [
+    {"stage_id": 0, "start_layer": 0, "end_layer": 2, "tp_group": [42, 3]},
+    {"stage_id": 1, "start_layer": 2, "end_layer": 3, "tp_group": [19, 7, 25, 11]},
+]
+```
+
+层区间须按序完整覆盖模型，各组的成员互不重叠。组内列表顺序决定本 Stage 的 Rank，首个节点是根。模型和节点预算沿用 5.5 的契约；具名权重清单的驻留字段使用物理卫星 ID 列表 `resident_nodes`。层内张量必须驻留于所属组全体成员；Embedding 驻留于首组全体成员；最终 Norm 和 LM Head 驻留于末组根节点。清单必须完整且与声明的放置一致。内部 TP 投影按本组大小均分，复制权重按整份计费，兼容的共享存储按物理卫星独立去重。
+
+每颗卫星的峰值 KV 等于其 Stage 的完整 KV 字节数除以本组大小。每颗卫星同时检查权重预算和权重加 KV 的合计预算；激活缓冲、Collective 工作区和框架占用由调用方另行预留。快照上需满足每个组内部连通和相邻根直连；多个 Stage 且请求需要 Decode 时，末根还需直连首根。相反方向可以共用一条无向边。
+
+结果含 `feasible, reasons, stages, nodes, required_links`。`stages` 按输入顺序报告 `split_valid` 和 `connected`；`nodes` 按 Stage、Rank 顺序列出权重分片、复制及层外权重、峰值 KV 和两项预算结论。切分不成立的 Stage 不输出节点字节数，其他可核算 Stage 仍给出明细。`required_links` 列出跨组交付的用途（`activation` 或 `token`）、方向和当前直连可用性；组内只报告连通性。缺失快照、清单矛盾或输入结构非法抛出 `ValueError`。合法输入下的切分、预算或连通条件失败通过 `feasible=False` 和具体原因报告。本阶段输出部署评估。
+
+### 5.7 单请求 Hybrid Prefill
+
+```python
+assessment = assess_hybrid_deployment(request, stages, model_info, node_resources,
+                                      active_links=active_links)
+if assessment["feasible"]:
+    prefill = plan_hybrid_prefill(request, assessment["stages"], model_info)
+```
+
+任务计划包含 `request_id, tasks, depends_on`。首组所有 Rank 从相同输入和本地 Embedding 开始。每个 Stage 只遍历自己的全局层区间，每层按 Attention、MLP 两段计算；各段的 Rank 可并行，随后由一个 All-Reduce 等待该段所有 Rank。Stage 边界依次生成一次根到根 Activation Transfer 和一次接收组 Broadcast，后者的 `root` 为接收根卫星编号，`layer_id` 为发送组末层。接收组的首层 Attention 都等待这个 Broadcast。
+
+组内归约、跨组直传和接收组广播各自记录完整逻辑负载 `input_length × hidden_size × activation 元素字节数`。末组末层的 MLP All-Reduce 是整份计划的完成任务，末组 Rank 0 的采样沿用抽象语义。
+
+### 5.8 单请求 Hybrid 完整调用流程
+
+沿用 5.6 的 Stage 和模型具名权重清单。下面的示例输入 17 个 Token，生成 3 个 Token。只有通过准入的部署才生成任务计划。
+
+```python
+from strategy import assemble_plan, assess_hybrid_deployment, plan_hybrid_prefill, plan_hybrid_decode
+
+request = {"request_id": "hybrid", "arrival_time": 0, "input_length": 17,
+           "output_length": 3, "service_requirements": None}
+node_resources = {sat: {"weight_memory_budget_bytes": 5000, "total_memory_budget_bytes": 9000}
+                  for stage in stages for sat in stage["tp_group"]}
+active_links = {(3, 42): 1, (7, 19): 1, (7, 25): 1, (11, 25): 1, (19, 42): 1}
+assessment = assess_hybrid_deployment(request, stages, model_info, node_resources,
+                                      active_links=active_links)
+plan = None
+if assessment["feasible"]:
+    admitted = assessment["stages"]
+    prefill = plan_hybrid_prefill(request, admitted, model_info)
+    decode = plan_hybrid_decode(request, admitted, model_info)
+    plan = assemble_plan("hybrid", request, prefill, decode)
+else:
+    print(assessment["reasons"])
+```
+
+单 Stage 时，Rank 0 本地采样，直接向本组广播 8 字节 Token ID，省去本地 Token Transfer。多 Stage 时，末组 Rank 0 先将 Token ID 传给首组 Rank 0，再由首组 Rank 0 广播。首轮的第一个通信任务依赖 Prefill 末层的 MLP All-Reduce，后续轮次依赖上一轮的末层 MLP All-Reduce。
+
+每轮消费一个 Token，`context_tokens` 为本轮追加前的上下文长度。各 Stage 内的 All-Reduce、各边界的 Activation Transfer 和接收组 Broadcast 均记录一个 Token 的隐藏状态字节数。最后一轮以末层 MLP All-Reduce 结束。`output_length=1` 时只有 Prefill 任务。上述两 Stage 部署通过准入时产生 24 个 Prefill 任务和两轮各 26 个 Decode 任务，共 76 个。完整测试输入见 [Hybrid 集成测试](tests/test_hybrid_integration.py)。
 
 ## 6. 执行仿真层
+
+**实现进度**：当前为模块骨架。策略层交付单请求任务、逻辑通信负载及依赖关系。以下各节描述待实现的执行职责，包括仿真时钟、时隙调度、路由、带宽分配以及实际开始与完成时间。
 
 ### 6.1 链路传输
 
