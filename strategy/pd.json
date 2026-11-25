@@ -1,0 +1,52 @@
+[
+  {
+    "request_id": "r1",
+    "strategy": "pd",
+    "tasks": [
+      {
+        "task_id": "r1:pd:prefill",
+        "request_id": "r1",
+        "task_type": "layer_compute",
+        "phase": "prefill",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "start_layer": 0,
+        "end_layer": 2
+      },
+      {
+        "task_id": "r1:pd:kv_transfer",
+        "request_id": "r1",
+        "task_type": "transfer",
+        "phase": "prefill",
+        "decode_step": 0,
+        "data_type": "kv",
+        "src": 4,
+        "dst": 9,
+        "data_size": 200
+      },
+      {
+        "task_id": "r1:pd:decode_step_1",
+        "request_id": "r1",
+        "task_type": "layer_compute",
+        "phase": "decode",
+        "node_id": 9,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "start_layer": 0,
+        "end_layer": 2
+      }
+    ],
+    "depends_on": {
+      "r1:pd:prefill": [],
+      "r1:pd:kv_transfer": [
+        "r1:pd:prefill"
+      ],
+      "r1:pd:decode_step_1": [
+        "r1:pd:kv_transfer"
+      ]
+    }
+  }
+]

@@ -1,0 +1,448 @@
+[
+  {
+    "request_id": "r1",
+    "strategy": "tp",
+    "tasks": [
+      {
+        "task_id": "r1:tp_prefill_layer_0_attention_rank_0",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_0_attention_rank_1",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 5,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_0_attention_all_reduce",
+        "request_id": "r1",
+        "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
+        "collective_type": "all_reduce",
+        "participants": [
+          4,
+          5
+        ],
+        "data_size": 48,
+        "layer_id": 0,
+        "root": null
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_0_mlp_rank_0",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_0_mlp_rank_1",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 5,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "phase": "prefill",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_0_mlp_all_reduce",
+        "request_id": "r1",
+        "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
+        "collective_type": "all_reduce",
+        "participants": [
+          4,
+          5
+        ],
+        "data_size": 48,
+        "layer_id": 0,
+        "root": null
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_1_attention_rank_0",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_1_attention_rank_1",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 5,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_1_attention_all_reduce",
+        "request_id": "r1",
+        "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
+        "collective_type": "all_reduce",
+        "participants": [
+          4,
+          5
+        ],
+        "data_size": 48,
+        "layer_id": 1,
+        "root": null
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_1_mlp_rank_0",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_1_mlp_rank_1",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 5,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "phase": "prefill",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
+      },
+      {
+        "task_id": "r1:tp_prefill_layer_1_mlp_all_reduce",
+        "request_id": "r1",
+        "task_type": "collective",
+        "phase": "prefill",
+        "decode_step": 0,
+        "collective_type": "all_reduce",
+        "participants": [
+          4,
+          5
+        ],
+        "data_size": 48,
+        "layer_id": 1,
+        "root": null
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_broadcast",
+        "request_id": "r1",
+        "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
+        "collective_type": "broadcast",
+        "participants": [
+          4,
+          5
+        ],
+        "data_size": 8,
+        "layer_id": null,
+        "root": 4
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_0_attention_rank_0",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_0_attention_rank_1",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 5,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_0_attention_all_reduce",
+        "request_id": "r1",
+        "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
+        "collective_type": "all_reduce",
+        "participants": [
+          4,
+          5
+        ],
+        "data_size": 16,
+        "layer_id": 0,
+        "root": null
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_0_mlp_rank_0",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_0_mlp_rank_1",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 5,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "phase": "decode",
+        "layer_id": 0,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_0_mlp_all_reduce",
+        "request_id": "r1",
+        "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
+        "collective_type": "all_reduce",
+        "participants": [
+          4,
+          5
+        ],
+        "data_size": 16,
+        "layer_id": 0,
+        "root": null
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_1_attention_rank_0",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 0
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_1_attention_rank_1",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 5,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "attention",
+        "tp_size": 2,
+        "rank": 1
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_1_attention_all_reduce",
+        "request_id": "r1",
+        "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
+        "collective_type": "all_reduce",
+        "participants": [
+          4,
+          5
+        ],
+        "data_size": 16,
+        "layer_id": 1,
+        "root": null
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_1_mlp_rank_0",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 0
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_1_mlp_rank_1",
+        "request_id": "r1",
+        "task_type": "operation_compute",
+        "node_id": 5,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "phase": "decode",
+        "layer_id": 1,
+        "operation": "mlp",
+        "tp_size": 2,
+        "rank": 1
+      },
+      {
+        "task_id": "r1:tp_decode_step_1_layer_1_mlp_all_reduce",
+        "request_id": "r1",
+        "task_type": "collective",
+        "phase": "decode",
+        "decode_step": 1,
+        "collective_type": "all_reduce",
+        "participants": [
+          4,
+          5
+        ],
+        "data_size": 16,
+        "layer_id": 1,
+        "root": null
+      }
+    ],
+    "depends_on": {
+      "r1:tp_prefill_layer_0_attention_rank_0": [],
+      "r1:tp_prefill_layer_0_attention_rank_1": [],
+      "r1:tp_prefill_layer_0_attention_all_reduce": [
+        "r1:tp_prefill_layer_0_attention_rank_0",
+        "r1:tp_prefill_layer_0_attention_rank_1"
+      ],
+      "r1:tp_prefill_layer_0_mlp_rank_0": [
+        "r1:tp_prefill_layer_0_attention_all_reduce"
+      ],
+      "r1:tp_prefill_layer_0_mlp_rank_1": [
+        "r1:tp_prefill_layer_0_attention_all_reduce"
+      ],
+      "r1:tp_prefill_layer_0_mlp_all_reduce": [
+        "r1:tp_prefill_layer_0_mlp_rank_0",
+        "r1:tp_prefill_layer_0_mlp_rank_1"
+      ],
+      "r1:tp_prefill_layer_1_attention_rank_0": [
+        "r1:tp_prefill_layer_0_mlp_all_reduce"
+      ],
+      "r1:tp_prefill_layer_1_attention_rank_1": [
+        "r1:tp_prefill_layer_0_mlp_all_reduce"
+      ],
+      "r1:tp_prefill_layer_1_attention_all_reduce": [
+        "r1:tp_prefill_layer_1_attention_rank_0",
+        "r1:tp_prefill_layer_1_attention_rank_1"
+      ],
+      "r1:tp_prefill_layer_1_mlp_rank_0": [
+        "r1:tp_prefill_layer_1_attention_all_reduce"
+      ],
+      "r1:tp_prefill_layer_1_mlp_rank_1": [
+        "r1:tp_prefill_layer_1_attention_all_reduce"
+      ],
+      "r1:tp_prefill_layer_1_mlp_all_reduce": [
+        "r1:tp_prefill_layer_1_mlp_rank_0",
+        "r1:tp_prefill_layer_1_mlp_rank_1"
+      ],
+      "r1:tp_decode_step_1_broadcast": [
+        "r1:tp_prefill_layer_1_mlp_all_reduce"
+      ],
+      "r1:tp_decode_step_1_layer_0_attention_rank_0": [
+        "r1:tp_decode_step_1_broadcast"
+      ],
+      "r1:tp_decode_step_1_layer_0_attention_rank_1": [
+        "r1:tp_decode_step_1_broadcast"
+      ],
+      "r1:tp_decode_step_1_layer_0_attention_all_reduce": [
+        "r1:tp_decode_step_1_layer_0_attention_rank_0",
+        "r1:tp_decode_step_1_layer_0_attention_rank_1"
+      ],
+      "r1:tp_decode_step_1_layer_0_mlp_rank_0": [
+        "r1:tp_decode_step_1_layer_0_attention_all_reduce"
+      ],
+      "r1:tp_decode_step_1_layer_0_mlp_rank_1": [
+        "r1:tp_decode_step_1_layer_0_attention_all_reduce"
+      ],
+      "r1:tp_decode_step_1_layer_0_mlp_all_reduce": [
+        "r1:tp_decode_step_1_layer_0_mlp_rank_0",
+        "r1:tp_decode_step_1_layer_0_mlp_rank_1"
+      ],
+      "r1:tp_decode_step_1_layer_1_attention_rank_0": [
+        "r1:tp_decode_step_1_layer_0_mlp_all_reduce"
+      ],
+      "r1:tp_decode_step_1_layer_1_attention_rank_1": [
+        "r1:tp_decode_step_1_layer_0_mlp_all_reduce"
+      ],
+      "r1:tp_decode_step_1_layer_1_attention_all_reduce": [
+        "r1:tp_decode_step_1_layer_1_attention_rank_0",
+        "r1:tp_decode_step_1_layer_1_attention_rank_1"
+      ],
+      "r1:tp_decode_step_1_layer_1_mlp_rank_0": [
+        "r1:tp_decode_step_1_layer_1_attention_all_reduce"
+      ],
+      "r1:tp_decode_step_1_layer_1_mlp_rank_1": [
+        "r1:tp_decode_step_1_layer_1_attention_all_reduce"
+      ],
+      "r1:tp_decode_step_1_layer_1_mlp_all_reduce": [
+        "r1:tp_decode_step_1_layer_1_mlp_rank_0",
+        "r1:tp_decode_step_1_layer_1_mlp_rank_1"
+      ]
+    }
+  }
+]

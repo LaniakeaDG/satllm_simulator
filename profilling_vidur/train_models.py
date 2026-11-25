@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 # Reuse already-present packages; never install or download dependencies.
-sys.path.insert(0, str(ROOT.parent / "dependencies"))
+sys.path.insert(0, str(ROOT / "dependencies"))
 import joblib
 import numpy as np
 import pandas as pd

@@ -1,0 +1,9 @@
+{
+  "link_events_path": "/home/zdg/OrbitServe/satllm_simulator/data/link_traces",
+  "profile_root": "/home/zdg/OrbitServe/satllm_simulator/profilling_vidur",
+  "strategy_path": "/home/zdg/OrbitServe/satllm_simulator/strategy",
+  "request_trace_path": null,
+  "bandwidth_bps": 200000000,
+  "end_time_ms": null,
+  "output_path": "/home/zdg/OrbitServe/satllm_simulator/execution/timeline.json"
+}

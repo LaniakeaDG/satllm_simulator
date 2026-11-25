@@ -1,0 +1,110 @@
+[
+  {
+    "request_id": "r1",
+    "strategy": "pp",
+    "tasks": [
+      {
+        "task_id": "r1:prefill_0",
+        "request_id": "r1",
+        "task_type": "layer_compute",
+        "phase": "prefill",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "start_layer": 0,
+        "end_layer": 1
+      },
+      {
+        "task_id": "r1:activation_transfer_0_1",
+        "request_id": "r1",
+        "task_type": "transfer",
+        "phase": "prefill",
+        "decode_step": 0,
+        "data_type": "activation",
+        "src": 4,
+        "dst": 9,
+        "data_size": 48
+      },
+      {
+        "task_id": "r1:prefill_1",
+        "request_id": "r1",
+        "task_type": "layer_compute",
+        "phase": "prefill",
+        "node_id": 9,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "start_layer": 1,
+        "end_layer": 2
+      },
+      {
+        "task_id": "r1:decode_step_1_token_transfer",
+        "request_id": "r1",
+        "task_type": "transfer",
+        "phase": "decode",
+        "decode_step": 1,
+        "data_type": "token",
+        "src": 9,
+        "dst": 4,
+        "data_size": 8
+      },
+      {
+        "task_id": "r1:decode_step_1_stage_0",
+        "request_id": "r1",
+        "task_type": "layer_compute",
+        "phase": "decode",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "start_layer": 0,
+        "end_layer": 1
+      },
+      {
+        "task_id": "r1:decode_step_1_activation_transfer_0_1",
+        "request_id": "r1",
+        "task_type": "transfer",
+        "phase": "decode",
+        "decode_step": 1,
+        "data_type": "activation",
+        "src": 4,
+        "dst": 9,
+        "data_size": 16
+      },
+      {
+        "task_id": "r1:decode_step_1_stage_1",
+        "request_id": "r1",
+        "task_type": "layer_compute",
+        "phase": "decode",
+        "node_id": 9,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "start_layer": 1,
+        "end_layer": 2
+      }
+    ],
+    "depends_on": {
+      "r1:prefill_0": [],
+      "r1:activation_transfer_0_1": [
+        "r1:prefill_0"
+      ],
+      "r1:prefill_1": [
+        "r1:activation_transfer_0_1"
+      ],
+      "r1:decode_step_1_token_transfer": [
+        "r1:prefill_1"
+      ],
+      "r1:decode_step_1_stage_0": [
+        "r1:decode_step_1_token_transfer"
+      ],
+      "r1:decode_step_1_activation_transfer_0_1": [
+        "r1:decode_step_1_stage_0"
+      ],
+      "r1:decode_step_1_stage_1": [
+        "r1:decode_step_1_activation_transfer_0_1"
+      ]
+    }
+  }
+]

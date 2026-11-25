@@ -1,0 +1,38 @@
+[
+  {
+    "request_id": "r1",
+    "strategy": "local",
+    "tasks": [
+      {
+        "task_id": "r1:local:prefill",
+        "request_id": "r1",
+        "task_type": "layer_compute",
+        "phase": "prefill",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 3,
+        "context_tokens": 3,
+        "start_layer": 0,
+        "end_layer": 2
+      },
+      {
+        "task_id": "r1:local:decode_step_1",
+        "request_id": "r1",
+        "task_type": "layer_compute",
+        "phase": "decode",
+        "node_id": 4,
+        "batch_size": 1,
+        "input_tokens": 1,
+        "context_tokens": 3,
+        "start_layer": 0,
+        "end_layer": 2
+      }
+    ],
+    "depends_on": {
+      "r1:local:prefill": [],
+      "r1:local:decode_step_1": [
+        "r1:local:prefill"
+      ]
+    }
+  }
+]

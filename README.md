@@ -1,7 +1,5 @@
 # 卫星 LLM Serving 仿真平台设计
 
-本文描述平台架构、模块职责与使用方法。策略层实现进度与验收范围见第 5 节。项目范围与实现原则见 [AGENTS.md](AGENTS.md)。
-
 ## 1. 总体架构
 
 平台采用离线建模与在线离散事件仿真相结合的架构，分为四层：
@@ -432,35 +430,115 @@ else:
 
 ## 6. 执行仿真层
 
-**实现进度**：当前为模块骨架。策略层交付单请求任务、逻辑通信负载及依赖关系。以下各节描述待实现的执行职责，包括仿真时钟、时隙调度、路由、带宽分配以及实际开始与完成时间。
+**实现进度**：节点计算时间仿真和单跳无竞争传输时间模型已完成第一版；统一事件时钟仍为模块骨架。策略层交付单请求任务、逻辑通信负载及依赖关系。计算模块消费当前 `strategy.py` 定义的 `layer_compute` 和 `operation_compute`，传输时间模型消费 `transfer`；`collective` 的执行尚未实现。
 
 ### 6.1 链路传输
 
-读取 Link Trace，按事件维护动态拓扑，结合链路带宽及并发传输竞争推进传输。职责包括：
+第一版实现在 `execution/transmission.py`，只计算单跳无竞争传输耗时，时间输入和输出统一为 ms：
 
-- 链路可达性判断与多跳传输；
-- 带宽分配；
-- 传输进度与完成时间计算；
-- 通信能耗计算。
+```python
+from execution.transmission import transfer_time_ms
 
-带宽由本模块配置，不来自离线链路事件文件。路由、带宽共享、断链后未完成传输的处理和通信能耗模型需另行明确。
+# task 沿用 strategy.TransferTask 原格式；data_size 单位为 Byte。
+duration_ms = transfer_time_ms(task, bandwidth_bps=1_000_000_000, delay_ms=2.0)
+```
+
+计算公式为 `duration_ms = 8 * task["data_size"] / bandwidth_bps * 1000 + delay_ms`。带宽单位为 bit/s，传播时延单位为 ms，带宽由调用方显式提供，不来自离线链路事件文件。零字节任务仍按公式计入传播时延。
+
+接口假设策略已将多跳路径拆成独立单跳任务，通过计划级 `depends_on` 表达完整接收后再转发的逐跳依赖；本次未修改策略层或补齐其多跳拆分。调用方负责确认 `src → dst` 链路可用，并提供该链路的带宽和传播时延。每个任务独享给定带宽，不计排队、带宽共享或并发竞争，本次耗时计算使用固定参数。
+
+当前未接入 Link Trace 回放、统一事件时钟、传输进度和完成事件，也未实现执行期间断链处理、参数变化、Collective 展开或通信能耗；这些功能不由本耗时函数推断。
 
 ### 6.2 节点计算
 
-根据任务与硬件 Profile 推进 Prefill、Decode 等计算，考虑 Batch Size、输入长度、上下文长度、设备类型和模型配置。职责包括：
+第一版实现在 `execution/computation.py`，使用 `profilling_vidur/original_vidur/manifest.json` 选择 A100、Llama-2-7B、FP16、TP=1/2/4/8 的单层组件随机森林，不硬编码带哈希的模型文件名。
 
-- 节点任务队列与 Batch 状态；
-- 执行进度与完成时间计算；
-- KV Cache 内存占用；
-- 计算能耗。
+节点通过显式注册表绑定 Profile：
 
-队列规则、Batch 更新、KV Cache 生命周期和计算能耗模型需另行明确。
+```python
+from execution.computation import NodeComputeSimulator
+
+node_profiles = {
+    4: {
+        "node_id": 4,
+        "profile_id": "a100-llama2-7b-fp16-tp1",
+        "device_type": "a100",
+        "model_id": "meta-llama/Llama-2-7b-hf",
+        "dtype": "float16",
+        "tensor_parallel_size": 1,
+    }
+}
+simulator = NodeComputeSimulator(node_profiles)
+record = simulator.submit(compute_task, ready_time_ms=0)
+```
+
+输入约定：
+
+- `layer_compute` 使用 `[start_layer, end_layer)`，仅支持 TP=1；单层组件和乘以层数得到任务纯计算时延。
+- `operation_compute` 使用 `operation=attention|mlp`、`layer_id`、`tp_size` 和 `rank`；每个 Rank 使用相应 TP 实测分片模型，不将 TP=1 时延除以组大小。
+- 完整 Prefill 将 `input_tokens` 作为当前 Chunk，并按历史 KV 为 0 查询；现有策略中的 `context_tokens` 是完整提示词长度，不直接作为 Prefill 历史 KV。Decode 要求每序列新增一个 Token，历史 KV 使用 `context_tokens`。
+- 计算任务必须与节点注册表中的设备、模型、精度和 TP 一致。随机森林对实测离散组合之外仍会返回结果；执行记录将 `in_measured_domain=false` 并附带中文告警，不把该值表述为已验证外推。
+
+输出记录包含任务和节点标识、`ready/start/end_time_ms`、排队与纯计算时延、单层时延、层数、组件明细、Profile 来源、测量域标记和告警。节点内采用单计算资源、非抢占 FIFO；提交顺序即同一节点的排队顺序，不动态合批。
+
+单层纯计算时延采用以下公式，各项单位均为 ms：
+
+$$
+\boxed{
+T_{\mathrm{layer,compute}}
+= T_{\mathrm{QKV}}
++ T_{\mathrm{AttnCore}}
++ T_{\mathrm{OProj}}
++ T_{\mathrm{MLP}}
++ T_{\mathrm{Norm}}
++ T_{\mathrm{RoPE}}
++ T_{\mathrm{Add}}
+}
+$$
+
+各项由相应 TP 并行度下的组件随机森林预测，映射如下：
+
+| 公式项 | Profile 组件 | 含义 |
+| --- | --- | --- |
+| $T_{\mathrm{QKV}}$ | `attn_pre_proj` | Q/K/V 输入投影 |
+| $T_{\mathrm{AttnCore}}$ | `attn_prefill` 或 `attn_decode` | 对应阶段的核心 Attention 运算 |
+| $T_{\mathrm{OProj}}$ | `attn_post_proj` | Attention 输出投影 |
+| $T_{\mathrm{MLP}}$ | `mlp_up_proj` + `mlp_act` + `mlp_down_proj` | MLP 投影与激活 |
+| $T_{\mathrm{Norm}}$ | `input_layernorm` + `post_attention_layernorm` | Attention 和 MLP 前的归一化 |
+| $T_{\mathrm{RoPE}}$ | `attn_rope` | Q、K 的旋转位置编码 |
+| $T_{\mathrm{Add}}$ | `add` | Profile 中的残差加法组件，计入一次 |
+
+公式分项与任务划分是不同口径：`attention` 计算任务包含输入 Norm、QKV 投影、RoPE、核心 Attention 和输出投影；`mlp` 计算任务包含后 Attention Norm、MLP 投影与激活及一次 `add`。`layer_compute` 的任务时延为上述单层纯计算时延乘以 `end_layer - start_layer`。
+
+保持计算与通信分离：TP Collective 由独立通信任务表示，不计入上述公式。公式不包含 KV Cache 保存项；原 Profile 的 KV Cache Save 缺少实测目标，仅有补零兼容模型，不纳入求和。这不影响 Decode Attention 使用已有 KV 长度作为预测特征，Decode 计算以历史 KV 已在执行节点就位为前提。
+
+本阶段只计算 GPU 组件时延和节点排队：不包含 Embedding、最终 Norm/LM Head、采样、CPU 开销、通信、功率、能耗、KV 内存、抢占或并发 Kernel。组件预测值相加是单层估计，不是校准后的端到端时延。
 
 ### 6.3 仿真调度与运行状态
 
-统一管理事件队列、仿真时钟和共享运行状态，协调策略、传输与计算模块。任务完成或拓扑变化后更新状态；未完成任务跨时隙保留，不在时隙边界重复开始。
+入口为 `run_simulation.py`。先并行预估计算耗时与独享带宽下的发送耗时，再用统一毫秒事件时钟，根据请求到达、任务依赖、计算队列与动态链路调整执行时间。
 
-电池容量、初始 SOC、充放电模型及能量约束需另行明确。
+- 每颗卫星一个计算资源，非抢占 FIFO；不同卫星并行，计算与通信可重叠，不自动合并 Batch。
+- 通信全双工，同方向的并发发送流均分带宽；未建链时等待，发送中断链后丢弃进度，重建后完整重传并重新读取传播时延。传播阶段不占带宽、不受后续断链影响。
+- 同刻先结算完成事件，再更新拓扑与请求到达，最后启动就绪任务。仅接收计算任务及已逐跳拆分的 `transfer`。
+
+每次运行前手动修改 `execution/inputs.json`：
+
+| 配置项 | 填写内容 |
+| --- | --- |
+| `link_events_path` | 具体星座的 `link_events.parquet` 文件，不是目录。 |
+| `profile_root` | 含 `manifest.json` 的 Vidur 目录，默认 `profilling_vidur/`。 |
+| `strategy_path` | 单个策略的任务图 JSON 文件，不是目录。 |
+| `request_trace_path` | 请求 JSON 列表，格式如 `[{"request_id": "r1", "arrival_time_ms": 0.0}]`，请求集合须与计划一致。 |
+| `bandwidth_bps` | 链路带宽，默认 `200000000`（200 Mbps）。 |
+| `end_time_ms` | 观测结束时间；为 `null` 时读取链路同目录 `manifest.yaml` 的 `duration_s` 并换算为 ms。 |
+| `output_path` | 输出时间线 JSON 的文件路径。 |
+
+```bash
+/home/zdg/.conda/envs/orbitserve/bin/python -B run_simulation.py
+```
+
+在项目目录下运行；配置中的相对路径以 `execution/inputs.json` 所在目录为基准。当前请求路径保留 `null`，链路和策略路径需改成具体文件后才能运行。输出包含每个任务的就绪、开始、结束时间、排队时间和状态，以及传输尝试记录；观测结束仍未完成的任务，其结束时间为 `null`。当前未建模功率、能耗、电池或 SOC。
 
 ## 7. 性能评估层
 
@@ -470,12 +548,11 @@ else:
 
 ## 8. 整体项目代码框架
 
-以下目录树描述完整目标结构。未确定数据契约的模块只保留职责骨架。
+以下列出主要代码与数据目录；指标汇总仍保留骨架。
 
 ```text
 satllm_simulator/
 ├── CLAUDE.md                 # 项目范围、实现原则与本地开发约束
-├── DESIGN.md                 # 整体规划、模型与接口约定、代码框架
 ├── README.md                 # 使用方法、实现状态与运行结果
 ├── requirements.txt          # 链路生成依赖
 ├── requirements-profile.txt  # GPU Profile 独立依赖
@@ -490,13 +567,23 @@ satllm_simulator/
 │   ├── workload.py           # ShareGPT 选择、本地聊天模板分词与来源摘要
 │   ├── power.py              # NVML 稳态板卡功率采样
 │   └── profile.py            # 真实层间执行、连续 Decode、逐层测量与 JSON 输出
-├── strategy/              # Serving 方式的部署与任务计划
+├── strategy.py               # Serving 部署与任务图生成
+├── strategy/                 # local/pd/pp/tp/hybrid 五个独立 JSON 计划
+├── profilling_vidur/
+│   ├── manifest.json         # A100 / Llama-2-7B 组件模型索引
+│   ├── models/               # TP1/2/4/8 组件随机森林
+│   ├── data/                 # Vidur 原始 Profile 数据
+│   ├── source/               # Vidur 源码
+│   ├── dependencies/         # 本地依赖
+│   ├── train_models.py       # CPU 训练与导出入口
+│   └── *_measurement_combinations.csv  # 实测输入形状清单
 ├── execution/
-│   ├── simulator.py          # 统一时钟、事件队列与共享运行状态
-│   ├── transmission.py       # 多跳传输、带宽竞争与通信能耗
-│   └── computation.py        # 节点队列、Batch、KV Cache 与计算能耗
-├── metrics.py                # 性能指标汇总
-├── run_simulation.py         # 在线仿真实验入口
+│   ├── inputs.json           # 每次运行手动填写的路径与实验参数
+│   ├── simulator.py          # 任务依赖、事件调度、排队与链路竞争
+│   ├── transmission.py       # 单跳无竞争传输耗时
+│   └── computation.py        # Vidur 计算预测与节点 FIFO
+├── metrics.py                # 性能指标汇总骨架
+├── run_simulation.py         # 仿真入口，读取配置与输入并保存时间线
 └── data/
     ├── link_traces/
     │   └── <preset>/
@@ -517,13 +604,13 @@ satllm_simulator/
 | `offline/power.py` | 固定层输入调用、NVML 与采样窗口。 | 稳态平均板卡功率，不推测缺失数据。 |
 | `offline/profile.py` | 本地模型、真实请求、CUDA 与测量条件。 | 真实层间传递与增长 KV，逐层测量时延/功率/显存，保存 JSON；不定义在线插值。 |
 | `strategy.py` | 请求负载、拓扑、运行状态和 Serving 方式。 | 计划计算流与传输流，不计算实际完成耗时。 |
-| `execution/transmission.py` | 计划传输流、链路事件、带宽和运行状态。 | 传输进度、完成事件及通信资源与能耗更新。 |
-| `execution/computation.py` | 计划计算流、Profile 和节点状态。 | 计算进度、完成事件及内存与能耗更新。 |
-| `execution/simulator.py` | 策略与执行模块、实验条件及离线数据。 | 统一推进事件与运行状态，收集执行记录。 |
+| `execution/transmission.py` | 单跳 `transfer`、带宽（bit/s）与传播时延（ms）。 | 无竞争传输耗时（ms），不维护拓扑或竞争状态。 |
+| `execution/computation.py` | `layer_compute` / `operation_compute`、A100 Vidur Profile 和节点映射。 | 组件与任务计算时延、单资源 FIFO 排队、完成记录；暂不计算内存与能耗。 |
+| `execution/simulator.py` | 已加载的任务图、请求和链路事件，以及 Vidur 模型目录与实验参数。 | 毫秒事件调度、节点 FIFO、带宽共享与断链重传，输出任务时间线。 |
 | `metrics.py` | 完成记录与资源使用数据。 | 按约定口径汇总性能指标。 |
-| `run_simulation.py` | 在线实验配置与输入数据。 | 组织策略、执行仿真和指标汇总。 |
+| `run_simulation.py` | `execution/inputs.json` 及其指定的输入文件。 | 读取配置与数据、调用仿真器并保存任务时间线。 |
 
-表中在线模块只描述逻辑输入输出，不预先定义尚未提供的字段或函数签名。
+计算接口见 6.2，当前仿真入口与输入配置见 6.3；指标汇总尚未实现。
 
 ### 8.2 模块协作
 
@@ -534,63 +621,33 @@ satllm_simulator/
 ```
 
 离线硬件 Profile：
-
 ```text
 模型 / GPU / 输入条件 → 配置校验与 GPU 占用检查
   → ShareGPT 分词 / 选择 → [真实层间执行 Prefill chunks / 连续 Decode steps]
   → 逐层 CUDA 计时 / NVML 稳态采样 → JSON 时间 / 功率 / 显存 / 原始样本
 ```
 
-在线实验：
+当前在线仿真：
 
 ```text
-run_simulation
-  → 读取 Link Trace、Profile 和实验条件
-  → simulator 管理时钟、事件与状态
-      → strategy 生成计划
-      → computation 与 transmission 并发推进
-      → 完成 / 拓扑事件更新状态
-  → metrics 汇总记录
+run_simulation.py → execution/inputs.json
+  → 读取链路事件、单个策略任务图和请求 trace，指定 Vidur 模型目录
+  → 并行预估计算耗时与无竞争发送耗时
+  → 统一事件时钟推进任务依赖、节点 FIFO、链路竞争与重传
+  → 输出任务时间线 JSON
 ```
+
+策略图预先生成，仿真器不在线调用策略；`metrics.py` 尚未接入此流程。
 
 离线数据生成与在线执行解耦；在线模块之间的共享状态由仿真调度统一管理，避免各自维护独立时钟。
 
 ## 9. 待明确的设计项
 
-以下内容在原始需求中缺少具体定义，需在对应模块业务实现前补充：
+当前请求到达格式、输入配置、计算 FIFO、同刻事件顺序、带宽均分及断链重传规则已确定，见 6.3。后续仍需明确：
 
-- 计划计算流、传输流的字段和依赖关系；
-- 原“六个模块输入与输出”详细表；
-- Profile 的在线查询与插值规则，以及其他模型/设备的扩展实验配置；
-- 请求负载与在线实验配置格式、调度时隙及事件优先级；
-- 各 Serving 方式的具体调度算法；
-- 路由、带宽共享及断链处理规则；
-- 计算队列、Batch 与 KV Cache 管理规则；
+- 正式请求 trace 的来源、负载规模与生成方法；
+- 策略层多跳路由、逐跳任务拆分及在线重规划规则；
+- 其他模型/设备的扩展 Profile，以及域外预测的校准或替代方法；
+- 动态 Batch、KV Cache 生命周期与内存准入规则；
 - 功率、能耗、电池和 SOC 模型；
 - 五个性能评估维度、指标公式及统计口径。
-
-## 10. 建模参考资料
-
-### 10.1 仓库参考代码
-
-| 参考 | 可借鉴内容 | 与本项目的区别 |
-| --- | --- | --- |
-| `../starrynet_analyze/dove_24h_analysis/dove_24h_topo.py` | TLE 传播与链路集合差分。 | 全局互选 KNN，不是 +Grid；时间、编号和光速约定不同。 |
-| `../starrynet_analyze/extract_dove_90.py` | 链路寿命汇总。 | 汇总 CSV 不代替完整建立、断开事件及传播时延。 |
-| `../starrynet_analyze/starlink_90min_analysis/starlink_90min_topo.py` | 球形地球遮挡几何。 | 跨面固定槽位映射，不是逐采样最近邻。 |
-| `../starrynet_analyze/starrynet/sn_observer.py` | 参数化卫星构造。 | 不继承其余无关功能。 |
-| `../tools/profile_qwen25_32b_layers.py` | 逐层真实权重加载、CUDA events 和原始样本保存。 | 原实现固定 32B，Prefill 不跨块维护 KV；本项目读取模型维度并顺序测量 chunked Prefill。 |
-
-参考代码中的编号、距离、遮挡裕量和有效光速不构成本项目的隐含默认值。
-
-### 10.2 公开星座与相位资料
-
-- [Iridium 官方公告](https://investor.iridium.com/2022-09-08-Iridium-Announces-Ninth-SpaceX-Launch)：66 颗运行卫星、6 面、每面 11 颗。
-- [Brahe：Walker Constellations](https://docs.brahe.space/latest/learn/orbits/walker.html)：Iridium-like 780 km、86.4°、66/6/2 示例及 360° 相位公式。
-- [MathWorks：walkerStar](https://www.mathworks.com/help/aerotbx/ug/satellitescenario.walkerstar.html)：采用 `180° * F / T`，与项目约定不同。
-- [Feng 等，Mercator Projection Superposition，§5.2.3、表 8 与表 9](https://www.mdpi.com/2076-3417/15/19/10610)：550 km、53° 下的 1584/24/1 和 1584/72/1 建模配置。
-- [ESA / GMV，LEOPARD Final Presentation，第 13 页](https://navisp.esa.int/uploads/files/project_documents/%5BNAVISP-EL1-019%20LEOPARD%5DFinal%20Presentation%20Slides.pdf)：OneWeb-like 648/18/9、87.4°、1200 km，但不能据此确认与项目的相位公式一致。
-- [IETF：卫星互联网星座性能基准草案](https://datatracker.ietf.org/doc/html/draft-lai-bmwg-sic-benchmarking/)：Kuiper K2 的 610 km、42°、36 面、每面 36 星；不是运营方参数认证。
-- [Satellite Selection for In-Band Coexistence of Dense LEO Networks，第 7 页 §IV、表 II](https://wireless.ee.ucla.edu/pdf/pub/satellite-selection.pdf)：Kuiper 壳层几何及 Walker Delta 建模，未给出可核实的 F。
-- [ITU：卫星网络技术介绍](https://www.itu.int/hub/2020/10/satellite-innovation-space-technology-to-reach-the-unconnected/)：OneWeb 一代不采用星间链路。
-- [IETF：A code to describe satellite constellations，版本 02](https://datatracker.ietf.org/doc/html/draft-piraux-space-constellation-code-02)：部分商业星座示例相位是推测值，不作为真实部署参数认证。

@@ -81,7 +81,7 @@ MLP 总计1044原行、1044全行去重记录、1036个TP内唯一形状，Atten
 固定CPU入口，无CLI、无下载或新增依赖，不执行GPU profiling：
 
 ```bash
-/home/zdg/.conda/envs/orbitserve/bin/python /home/zdg/OrbitServe/satllm_simulator/profilling_vidur/original_vidur/train_models.py
+/home/zdg/.conda/envs/orbitserve/bin/python /home/zdg/OrbitServe/satllm_simulator/profilling_vidur/train_models.py
 ```
 
 只加载可信本地joblib，使用manifest记录的依赖版本。组件耗时不能直接无条件相加为全模型端到端时延；层数、TP collective、流水线、调度及CPU开销等仍需另行建模，本目录不提供在线仿真接口。
@@ -98,7 +98,7 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
-ROOT = Path('/home/zdg/OrbitServe/satllm_simulator/profilling_vidur/original_vidur')
+ROOT = Path('/home/zdg/OrbitServe/satllm_simulator/profilling_vidur')
 sys.path.insert(0, str(ROOT.parent / 'dependencies'))
 
 import joblib
